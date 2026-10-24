@@ -18,6 +18,9 @@ shell/server.log
 __pycache__/
 *.pyc
 
+# install-cli.ps1 备份的用户 PATH，含本机全部目录结构
+shell/path-backup-*.txt
+
 # 依赖与杂项
 node_modules/
 *.log

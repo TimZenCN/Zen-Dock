@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Zen-Dock 命令行包装（Linux / macOS / Git Bash）
+exec node "$(dirname "$0")/bin/zd.mjs" "$@"

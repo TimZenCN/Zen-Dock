@@ -5,10 +5,12 @@
   "description": "A zero-dependency local service panel: host static pages, supervise long-running services, run one-shot scripts, all from one browser tab.",
   "type": "module",
   "bin": {
-    "zen-dock": "./index.mjs"
+    "zen-dock": "./index.mjs",
+    "zd": "./bin/zd.mjs"
   },
   "scripts": {
-    "start": "node index.mjs"
+    "start": "node index.mjs",
+    "cli": "node bin/zd.mjs"
   },
   "engines": {
     "node": ">=20"

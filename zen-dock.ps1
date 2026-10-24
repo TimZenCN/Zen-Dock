@@ -1,4 +1,4 @@
-# zen-dock.ps1 - start the Zen-Dock local panel
+﻿# zen-dock.ps1 - start the Zen-Dock local panel
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File "D:\work\Project\Zen-Dock\zen-dock.ps1"

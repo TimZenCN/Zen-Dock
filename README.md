@@ -67,6 +67,87 @@ pythonw shell/desktop.py --hidden
 
 热键是系统级注册（`RegisterHotKey`），不是键盘钩子——所以能真做冲突检测：注册失败就说明被别的程序占了，设置页会直接告诉你。改热键时如果新的注册不上，会自动把旧的恢复回来，不会让你失去唤出能力。
 
+## 命令行（zd）
+
+不开浏览器也能管理。装一次：
+
+```powershell
+.\install-cli.ps1          # 写进用户 PATH，不碰系统 PATH，不需要管理员
+```
+
+装完**新开一个终端**，`zd` 就能用了。查状态 `.\install-cli.ps1 -Status`，撤销 `-Uninstall`。
+
+脚本会把原 PATH 备份到 `shell/path-backup-<时间>.txt`，并且保持注册表类型（`REG_EXPAND_SZ`）——直接 `SetEnvironmentVariable` 会把它降级成 `REG_SZ`，`%USERPROFILE%` 这类变量就被固化了。
+
+### 命令
+
+```
+zd                        列出所有项（= zd list）
+zd status                 hub 自身：地址、项数、在跑什么
+zd show <id>              单项详情
+zd start <id>             启动，等端口探活通过才返回
+zd stop <id>              停止，taskkill 整棵进程树
+zd restart <id>
+zd run <id> [--参数 值]   跑脚本，参数按脚本的 params 映射
+zd logs <id> [-f] [-n 50] 看日志，-f 跟随
+zd open <id>              用设置的浏览器打开
+zd add                    注册新项（不带参数进向导）
+zd edit <id> --port 8888
+zd rm <id> [-f]
+zd settings [key=value]
+zd stop-all
+zd up                     前台启动 hub
+zd help [命令]
+```
+
+### 注册
+
+不带参数走交互向导，逐项问、带默认值：
+
+```
+$ zd add
+类型 (service / script / page) [service]:
+ID（字母数字下划线连字符）: relay
+名称 [relay]: Provider Relay
+启动命令（如 node / python / npm）: node
+参数，空格分隔（可留空）: index.mjs
+工作目录（可留空 = 项目根）: D:/work/.../provider-relay
+监听端口（可留空 = 不做端口探活）: 8787
+```
+
+带参数直接写，适合脚本和 AI 调用：
+
+```bash
+zd add service relay --name "Provider Relay" --cmd node --args "index.mjs" --port 8787
+zd add script deploy --name "部署" --shell powershell --path "run.ps1"
+zd add page notes --name "笔记" --dir "./sites/notes"
+```
+
+### hub 没在跑的时候
+
+CLI 按命令性质走两条路，不是所有命令都要求 hub 在线：
+
+| 命令 | hub 不在时 |
+|---|---|
+| `list` `show` `add` `edit` `rm` `settings` | 照常可用，直接读写 `hub.config.json` |
+| `start` `stop` `run` `logs` `open` | 报错，提示先 `zd up` |
+
+原因是**进程状态只活在 hub 的内存里**。CLI 自己去 spawn 一个服务，面板不知道、日志收不到、也停不掉，两边状态会打架。配置则是文件，hub 有热重载，改完自己就认到了。
+
+`zd up` 是前台跑 `node index.mjs --no-open`，能看到启动日志，Ctrl+C 退出。它不会偷偷在后台起进程——要托盘和拓展坞，双击 `zen-dock-window.bat`。
+
+### 输出
+
+默认对齐表格 + 状态色。所有命令都支持 `--json`：
+
+```bash
+zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
+```
+
+`--no-color` 或环境变量 `NO_COLOR` 关颜色；输出被重定向时自动关。
+
+退出码：`0` 成功，`1` 出错，`2` hub 没在跑。
+
 ## 设置
 
 右上角「设置」：
@@ -172,6 +253,9 @@ hub 重启后，之前跑着的服务不会丢：
 - **拓展坞焦点可能抢不到。** 系统有"前台锁定"，`SetForegroundWindow` 会被挡。代码用 `AttachThreadInput` 绕过并重试到焦点稳定；万一始终不稳，会跳过失焦自动关闭（坞仍然能开，按 Esc 或再按热键关），不会出现"一开就关"。
 - **热键是全局独占的。** 注册成功后别的程序收不到这个组合。有些软件用 Alt+字母做菜单，撞了就在设置里换一个。
 - **开机自启注册的是桌面窗口，不是服务。** 开机后窗口会自己起服务；如果你改成了「退出程序」，关窗口就等于全关。
+- **`zd` 的 Ctrl+C 只在真终端里可靠。** Windows 没有 POSIX 信号，Node 的 `SIGINT` 靠控制台事件模拟。在 Windows Terminal / PowerShell / cmd 里按 Ctrl+C 正常；从 Git Bash 用 `kill -INT` 或 `timeout -s INT` 打过去可能到不了。真按不动就再按一次，第二次会强制退出。
+- **`--port` 是 item 的端口，hub 端口是 `--hub-port`。** 两个不能共用一个名字，否则 `zd edit x --port 8888` 会被当成去连 8888 上的 hub。
+- **`zd add` 的向导在管道输入下可能提前结束。** 把答案 `echo` 进去时，输入读完就 EOF，后面的问题拿不到值。手动在终端里跑没有这个问题。
 
 ## 目录
 
@@ -179,9 +263,13 @@ hub 重启后，之前跑着的服务不会丢：
 index.mjs                    入口
 zen-dock.ps1                 浏览器启动（PowerShell）
 zen-dock-window.bat          桌面窗口启动
+zd.cmd / zd                  CLI 包装（ASCII-only，cmd.exe 按 OEM 代码页读文件）
+install-cli.ps1              把项目目录写进用户 PATH（幂等 + 备份）
 hub.config.example.json      配置模板（进仓库）
 hub.config.json              你的实际配置（不进仓库，首次运行自动生成）
 hub.state.json               运行时 pid，自动写（不进仓库）
+bin/
+  zd.mjs                     CLI 入口：参数解析 / 命令分发 / help
 lib/
   server.js                  路由 + Origin 校验 + SSE
   config.js                  配置读写校验（原子写）+ 相对路径解析
@@ -191,6 +279,10 @@ lib/
   sites.js                   静态托管 + <base> 注入
   system.js                  开浏览器窗口 / 开资源管理器 / 开机自启注册表
   panel.js                   管理页（内联 CSS/JS）
+  cli/
+    client.js                hub 探测 + HTTP + SSE 消费
+    format.js                表格（CJK 宽度感知）/ 着色 / JSON
+    commands.js              14 个命令的实现
 shell/
   desktop.py                 桌面窗口外壳（pywebview + WebView2 + pystray 托盘 + 拓展坞）
   hotkey.py                  全局热键（RegisterHotKey + 消息循环）
