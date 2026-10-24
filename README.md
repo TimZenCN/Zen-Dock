@@ -30,15 +30,42 @@ Windows 下双击 `zen-dock.ps1` 也行（支持 `-Restart` 先杀掉占用端�
 
 不想开浏览器就双击 `zen-dock-window.bat`。
 
-**首次使用**先双击 `shell/setup.bat`，它会创建 `.venv` 并装上 pywebview（需要系统里有 Python 3.10+）。
+**首次使用**先双击 `shell/setup.bat`，它会创建 `.venv` 并装上 pywebview / pystray（需要系统里有 Python 3.10+）。
 
-窗口是原生 WinForms 窗口 + 系统 WebView2 渲染，不是浏览器套壳：自己的标题栏、自己的图标、自己的大小和位置。关掉窗口，服务跟着退出。
+窗口是原生 WinForms 窗口 + 系统 WebView2 渲染，不是浏览器套壳：自己的标题栏、自己的图标、自己的大小和位置。
+
+关掉窗口之后干什么，在**设置**里选：
+
+- **退出程序**（默认）—— 连自己启动的服务一起停掉
+- **最小化到托盘** —— 窗口隐藏，服务继续跑，点托盘图标恢复
 
 **外壳和核心是分开的。** `index.mjs` 依然是零依赖的纯 Node 服务，不装 pywebview 也能用浏览器访问，`shell/` 只是多一层可选外壳。
 
 端口上已经有服务在跑时（比如你先用浏览器开了），窗口会直接连过去，关窗口**不会**杀那个服务。
 
 改图标配色或字形：`.venv/Scripts/python.exe shell/make_icon.py`。
+
+## 设置
+
+右上角「设置」：
+
+| 项 | 说明 |
+|---|---|
+| 打开页面 | **新浏览器窗口**（带地址栏，能复制 URL）或**无地址栏独立窗口**（`--app` 模式，像独立应用） |
+| 关闭窗口时 | 退出程序 / 最小化到托盘。只在桌面窗口里有效 |
+| 开机自启 | 写进 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，不需要管理员权限。设置页会显示当前是否已注册、注册的具体命令是什么 |
+
+「打开页面」走的是服务端 `spawn` 而不是前端 `window.open`——只有这样才能真正控制窗口形态（`--new-window` / `--app`），在 WebView2 里也不会被拦。
+
+## 卡片操作
+
+每张卡片两个按钮 + 一个三点菜单：
+
+- 主按钮：启动 / 停止 / 运行
+- **打开页面**：服务和静态页面都有，在独立浏览器窗口里打开
+- **⋮ 菜单**：日志、打开所在文件夹、编辑、删除
+
+「打开所在文件夹」对脚本会定位并选中文件本身，对服务和页面直接打开目录。
 
 ## 配置
 
@@ -117,6 +144,8 @@ hub 重启后，之前跑着的服务不会丢：
 - **不做反向代理。** 各服务保留自己的端口，hub 只负责发现、启停、跳转。relay 的 `/__relay/` 面板是它自己的，hub 不重造。
 - **崩溃不自动重启。** 自己用的工具，崩了就崩了，看日志改代码。自动重启只会掩盖 bug。
 - **桌面外壳只在 Windows 测过。** pywebview 本身跨平台，但 `desktop.py` 里的 `taskkill`、`CREATE_NO_WINDOW`、`MessageBoxW` 都是 Windows 专属分支。另外它依赖系统 WebView2 运行时（Win10/11 一般自带，Win7 要单独装）。
+- **托盘图标可能被系统折叠。** Windows 默认会把新托盘图标塞进 `^` 折叠区，需要自己拖出来固定。
+- **开机自启注册的是桌面窗口，不是服务。** 开机后窗口会自己起服务；如果你改成了「退出程序」，关窗口就等于全关。
 
 ## 目录
 
@@ -134,12 +163,13 @@ lib/
   scripts.js                 三种 shell + 参数拼接
   logs.js                    环形缓冲 + GBK 回退解码
   sites.js                   静态托管 + <base> 注入
+  system.js                  开浏览器窗口 / 开资源管理器 / 开机自启注册表
   panel.js                   管理页（内联 CSS/JS）
 shell/
-  desktop.py                 桌面窗口外壳（pywebview + WebView2）
+  desktop.py                 桌面窗口外壳（pywebview + WebView2 + pystray 托盘）
   setup.bat                  首次建 .venv
   make_icon.py               生成 shell/icon.ico
-  requirements.txt           外壳依赖（pywebview / pillow）
+  requirements.txt           外壳依赖（pywebview / pystray / pillow）
 sites/<id>/                  静态页面
 test-scripts/                冒烟测试
 ```

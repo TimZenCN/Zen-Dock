@@ -1,5 +1,6 @@
 # 桌面窗口外壳的依赖。核心服务（index.mjs）零依赖，不装这个也能用浏览器访问。
 pywebview>=6.0
+pystray>=0.19
 
 # 仅 shell/make_icon.py 需要，改图标时用
 pillow>=10.0

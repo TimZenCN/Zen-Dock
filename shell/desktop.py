@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import os
 import shutil
 import socket
@@ -29,7 +30,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SHELL = ROOT / "shell"
+CONFIG = ROOT / "hub.config.json"
 ICON = SHELL / "icon.ico"
+ICON_PNG = SHELL / "icon.png"
 WEBVIEW_DATA = ROOT / ".webview"
 SERVER_LOG = SHELL / "server.log"
 DESKTOP_LOG = SHELL / "desktop.log"
@@ -41,10 +44,11 @@ NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
 def setup_logging() -> None:
     """pythonw 下没有控制台。
 
-    注意：sys.stdout 不一定是 None——有时是个存在但写不进去的对象，
-    所以不能只判 None，得真的试着写一次。
+    坑：pythonw 的 sys.stdout 不一定是 None，也可能是个"写入不报错但也不落盘"的
+    黑洞对象，所以试写判断不可靠。直接看可执行文件名最稳——pythonw 就强制落文件。
     """
-    if sys.stdout is not None:
+    headless = Path(sys.executable).name.lower().startswith("pythonw")
+    if not headless and sys.stdout is not None:
         try:
             sys.stdout.write("")
             sys.stdout.flush()
@@ -133,6 +137,83 @@ def kill_tree(proc: subprocess.Popen) -> None:
         log(f"清理失败：{e}")
 
 
+# ---------- 设置与托盘 ----------
+
+
+def read_settings() -> dict:
+    """每次都读文件。设置页改完要立刻生效，所以不做缓存。"""
+    try:
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+        return cfg.get("settings") or {}
+    except Exception as e:
+        log(f"读配置失败，按默认处理：{e}")
+        return {}
+
+
+class Tray:
+    """托盘常驻。只在第一次最小化时创建，不选托盘的人不会白占一个图标。"""
+
+    def __init__(self) -> None:
+        self.icon = None
+        self._window = None
+        self._on_quit = None
+
+    def ensure(self, window, on_quit) -> bool:
+        if self.icon is not None:
+            return True
+        try:
+            import pystray
+            from PIL import Image
+        except Exception as e:
+            log(f"托盘依赖缺失：{e}")
+            return False
+
+        self._window = window
+        self._on_quit = on_quit
+
+        source = ICON_PNG if ICON_PNG.exists() else ICON
+        try:
+            image = Image.open(source).convert("RGBA").resize((64, 64), Image.LANCZOS)
+        except Exception as e:
+            log(f"托盘图标加载失败：{e}")
+            return False
+
+        menu = pystray.Menu(
+            pystray.MenuItem("显示窗口", self._show, default=True),
+            pystray.MenuItem("退出 Zen-Dock", self._exit),
+        )
+        icon = pystray.Icon("zen-dock", image, "Zen-Dock", menu)
+        self.icon = icon
+        threading.Thread(target=icon.run, daemon=True).start()
+        log("托盘已启动")
+        return True
+
+    def _show(self, icon=None, item=None) -> None:
+        try:
+            self._window.show()
+            self._window.restore()
+        except Exception as e:
+            log(f"恢复窗口失败：{e}")
+
+    def _exit(self, icon=None, item=None) -> None:
+        log("托盘请求退出")
+        if self.icon is not None:
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
+        if self._on_quit:
+            self._on_quit()
+
+    def stop(self) -> None:
+        if self.icon is not None:
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
+            self.icon = None
+
+
 def main() -> int:
     setup_logging()
 
@@ -157,7 +238,7 @@ def main() -> int:
 
     WEBVIEW_DATA.mkdir(parents=True, exist_ok=True)
 
-    webview.create_window(
+    window = webview.create_window(
         "Zen-Dock",
         url=f"http://{args.host}:{args.port}/",
         width=1280,
@@ -165,6 +246,31 @@ def main() -> int:
         min_size=(900, 600),
         background_color="#0b0e14",
     )
+
+    flags = {"quitting": False}
+    tray = Tray()
+
+    def request_quit() -> None:
+        flags["quitting"] = True
+        try:
+            window.destroy()
+        except Exception as e:
+            log(f"销毁窗口失败：{e}")
+
+    def on_closing() -> bool:
+        """返回 False 可以拦下这次关闭。"""
+        if flags["quitting"]:
+            return True
+        action = read_settings().get("closeAction", "quit")
+        if action == "tray":
+            if tray.ensure(window, request_quit):
+                window.hide()
+                log("已最小化到托盘")
+                return False
+            log("托盘不可用，改为直接退出")
+        return True
+
+    window.events.closing += on_closing
 
     try:
         if args.auto_close:
@@ -187,9 +293,11 @@ def main() -> int:
         )
     except Exception as e:
         alert("Zen-Dock", f"窗口启动失败：\n{type(e).__name__}: {e}")
+        tray.stop()
         kill_tree(server_proc)
         return 1
 
+    tray.stop()
     log("窗口已关闭")
     kill_tree(server_proc)
     log("退出")
