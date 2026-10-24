@@ -39,9 +39,18 @@ NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
 
 
 def setup_logging() -> None:
-    """pythonw 下没有控制台，sys.stdout 是 None，任何 print 都会炸。"""
+    """pythonw 下没有控制台。
+
+    注意：sys.stdout 不一定是 None——有时是个存在但写不进去的对象，
+    所以不能只判 None，得真的试着写一次。
+    """
     if sys.stdout is not None:
-        return
+        try:
+            sys.stdout.write("")
+            sys.stdout.flush()
+            return
+        except Exception:
+            pass
     f = open(DESKTOP_LOG, "a", encoding="utf-8", buffering=1)
     sys.stdout = f
     sys.stderr = f
