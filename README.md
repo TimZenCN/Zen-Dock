@@ -16,6 +16,8 @@
 
 ## 快速开始
 
+### 浏览器
+
 ```bash
 node index.mjs                 # 起服务，自动开浏览器
 node index.mjs --no-open       # 不自动开
@@ -23,6 +25,22 @@ node index.mjs --port 7718     # 换端口
 ```
 
 Windows 下双击 `zen-dock.ps1` 也行（支持 `-Restart` 先杀掉占用端口的旧实例）。
+
+### 桌面窗口
+
+不想开浏览器就双击 `zen-dock-window.bat`。
+
+**首次使用**先双击 `shell/setup.bat`，它会创建 `.venv` 并装上 pywebview（需要系统里有 Python 3.10+）。
+
+窗口是原生 WinForms 窗口 + 系统 WebView2 渲染，不是浏览器套壳：自己的标题栏、自己的图标、自己的大小和位置。关掉窗口，服务跟着退出。
+
+**外壳和核心是分开的。** `index.mjs` 依然是零依赖的纯 Node 服务，不装 pywebview 也能用浏览器访问，`shell/` 只是多一层可选外壳。
+
+端口上已经有服务在跑时（比如你先用浏览器开了），窗口会直接连过去，关窗口**不会**杀那个服务。
+
+改图标配色或字形：`.venv/Scripts/python.exe shell/make_icon.py`。
+
+## 配置
 
 配置在 `hub.config.json`，可以直接手改，改完自动热重载；也可以在页面上点「+ 添加」改，两边同步。
 
@@ -98,25 +116,32 @@ hub 重启后，之前跑着的服务不会丢：
 - **日志只在内存。** 每项默认保留 500 行，重启即丢。要历史得落盘，没做。
 - **不做反向代理。** 各服务保留自己的端口，hub 只负责发现、启停、跳转。relay 的 `/__relay/` 面板是它自己的，hub 不重造。
 - **崩溃不自动重启。** 自己用的工具，崩了就崩了，看日志改代码。自动重启只会掩盖 bug。
+- **桌面外壳只在 Windows 测过。** pywebview 本身跨平台，但 `desktop.py` 里的 `taskkill`、`CREATE_NO_WINDOW`、`MessageBoxW` 都是 Windows 专属分支。另外它依赖系统 WebView2 运行时（Win10/11 一般自带，Win7 要单独装）。
 
 ## 目录
 
 ```
 index.mjs                    入口
-zen-dock.ps1                 双击启动
+zen-dock.ps1                 浏览器启动（PowerShell）
+zen-dock-window.bat          桌面窗口启动
 hub.config.example.json      配置模板（进仓库）
 hub.config.json              你的实际配置（不进仓库，首次运行自动生成）
 hub.state.json               运行时 pid，自动写（不进仓库）
 lib/
-  server.js        路由 + Origin 校验 + SSE
-  config.js        配置读写校验（原子写）
-  services.js      常驻进程：spawn / 探活 / 强杀 / 接管
-  scripts.js       三种 shell + 参数拼接
-  logs.js          环形缓冲 + GBK 回退解码
-  sites.js         静态托管 + <base> 注入
-  panel.js         管理页（内联 CSS/JS）
-sites/<id>/        静态页面
-test-scripts/      冒烟测试
+  server.js                  路由 + Origin 校验 + SSE
+  config.js                  配置读写校验（原子写）+ 相对路径解析
+  services.js                常驻进程：spawn / 探活 / 强杀 / 接管
+  scripts.js                 三种 shell + 参数拼接
+  logs.js                    环形缓冲 + GBK 回退解码
+  sites.js                   静态托管 + <base> 注入
+  panel.js                   管理页（内联 CSS/JS）
+shell/
+  desktop.py                 桌面窗口外壳（pywebview + WebView2）
+  setup.bat                  首次建 .venv
+  make_icon.py               生成 shell/icon.ico
+  requirements.txt           外壳依赖（pywebview / pillow）
+sites/<id>/                  静态页面
+test-scripts/                冒烟测试
 ```
 
 ## 冒烟测试
@@ -130,4 +155,6 @@ node test-scripts/smoke.mjs
 
 ## 环境
 
-Node 20+。Windows 是主要目标平台，Linux/macOS 上脚本那部分能跑但没细测。
+- **核心**：Node 20+，零依赖
+- **桌面窗口**：Python 3.10+（只用来跑 `shell/desktop.py`）+ 系统 WebView2 运行时
+- Windows 是主要目标平台。Linux/macOS 上核心能跑，脚本那部分没细测，桌面外壳的 Windows 分支会退化

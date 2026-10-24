@@ -10,6 +10,12 @@ hub.config.json.tmp
 sites/*
 !sites/demo/
 
+# 桌面外壳的虚拟环境与运行产物
+.venv/
+.webview/
+shell/desktop.log
+shell/server.log
+
 # 依赖与杂项
 node_modules/
 *.log
