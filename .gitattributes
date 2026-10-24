@@ -1,0 +1,7 @@
+# 测试夹具里有编码敏感的文件，必须字节固定，不能被 git 改写换行或编码：
+# - t.bat 是 GBK 编码（模拟真实的 Windows 批处理），用于验证 GBK 回退解码
+# - t.ps1 是 UTF-8 with BOM + CRLF，模拟真实的 PowerShell 脚本
+# 这两个文件内容不会常改，牺牲 diff 换可复现性。
+* text=auto
+*.bat binary
+*.ps1 binary

@@ -1,0 +1,7 @@
+hub.state.json
+hub.state.json.tmp
+hub.config.json.tmp
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Zen-Dock 示例页面</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>示例页面</h1>
+  <p>这个页面通过 <code>/s/demo/</code> 挂载。它的样式表用的是<strong>相对路径</strong> <code>style.css</code>，
+  Zen-Dock 会自动注入 <code>&lt;base href="/s/demo/"&gt;</code> 让它正常加载。</p>
+  <p class="note">如果这里样式生效（深色背景、等宽字体标题），说明静态托管和 base 注入都正常。</p>
+  <ul>
+    <li>绝对路径（<code>/style.css</code>）会 404，这是已知限制。</li>
+    <li>要修绝对路径，得给每个站点独立端口或子域，P0 不做。</li>
+  </ul>
+</div>
+</body>
+</html>
