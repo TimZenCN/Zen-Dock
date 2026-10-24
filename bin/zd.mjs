@@ -84,7 +84,9 @@ const COMMANDS = {
       '  --args "<参数>"      参数，空格分隔，含空格的用引号\n' +
       '  --cwd <目录>         工作目录\n' +
       '  --port <端口>        监听端口，用于启动探活\n' +
-      '  --url <地址>         打开页面时的地址\n\n' +
+      '  --url <地址>         打开页面时的地址（兜底，可留空）\n' +
+      '  --urlFrom <正则>     从输出里抓真实地址，第一个捕获组是 URL\n' +
+      '  --startTimeoutMs <ms> 端口探活超时，默认 15000\n\n' +
       'script 选项：\n' +
       '  --shell <类型>       powershell / python / bat，默认 powershell\n' +
       '  --path <路径>        必填，脚本文件路径\n' +
@@ -164,6 +166,8 @@ const VALUE_FLAGS = new Set([
   'cwd',
   'port',
   'url',
+  'urlFrom',
+  'startTimeoutMs',
   'shell',
   'path',
   'dir',

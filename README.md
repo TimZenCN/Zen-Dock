@@ -182,9 +182,34 @@ zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
 
 | kind | 干什么 | 关键字段 |
 |---|---|---|
-| `service` | 常驻进程，有端口、能探活、能启停 | `cmd` `args` `cwd` `port` `url` |
+| `service` | 常驻进程，有端口、能探活、能启停 | `cmd` `args` `cwd` `port` `url` `urlFrom` |
 | `script` | 一次性脚本，点一下跑完 | `shell` `path` `params` |
 | `page` | 静态页面/目录，挂在 `/s/<id>/` | `dir` `entry` |
+
+### 地址要等服务自己说的时候
+
+有些服务启动后才打印真实地址，而且地址每次都变（典型是一次性 token）。这种配 `urlFrom`，hub 在它的输出里匹配，第一个捕获组当 URL：
+
+```json
+{
+  "id": "dsh-web",
+  "kind": "service",
+  "name": "DSH Web",
+  "cmd": "node",
+  "args": ["D:/.../@deepseek-ai/dsh/lib/bin.js", "web", "--no-open"],
+  "cwd": "D:/work",
+  "port": 3080,
+  "url": "http://127.0.0.1:3080/",
+  "urlFrom": "dsh web: (http\\S+)",
+  "startTimeoutMs": 30000
+}
+```
+
+`dsh web` 会打印 `dsh web: http://127.0.0.1:3080/?token=xxx`，裸地址直接访问是 401。配了 `urlFrom` 之后：
+
+- 抓到的地址存进 `runtime.url`，卡片的「打开页面」优先用它，`zd open` 也一样
+- **启动会等地址出现再返回**（默认最多 10 秒，`urlWaitMs` 可调），避免刚看到变绿就点、撞上 401
+- `url` 字段留作兜底：抓不到的时候（比如 hub 重启后接管的外部进程，没有日志可读）还用它
 
 `script` 的 `shell` 支持 `powershell` / `python` / `bat`。`params` 会在详情页渲染成输入框：
 
@@ -256,6 +281,7 @@ hub 重启后，之前跑着的服务不会丢：
 - **`zd` 的 Ctrl+C 只在真终端里可靠。** Windows 没有 POSIX 信号，Node 的 `SIGINT` 靠控制台事件模拟。在 Windows Terminal / PowerShell / cmd 里按 Ctrl+C 正常；从 Git Bash 用 `kill -INT` 或 `timeout -s INT` 打过去可能到不了。真按不动就再按一次，第二次会强制退出。
 - **`--port` 是 item 的端口，hub 端口是 `--hub-port`。** 两个不能共用一个名字，否则 `zd edit x --port 8888` 会被当成去连 8888 上的 hub。
 - **`zd add` 的向导在管道输入下可能提前结束。** 把答案 `echo` 进去时，输入读完就 EOF，后面的问题拿不到值。手动在终端里跑没有这个问题。
+- **用 `Start-Process` 开新窗口的脚本，hub 显示「完成」而不是「运行中」。** 这类脚本（比如 `Run/` 下那几个 Flutter 启动器）自己立刻退出，真正的进程在 hub 之外——hub 看不到它的日志，也停不掉它。这是脚本本来的设计，不是 bug。如果希望 hub 能管，得让脚本直接跑命令而不是 `Start-Process`，代价是失去那个独立窗口（`flutter run` 的 `r`/`q` 热重载按键需要真终端）。
 
 ## 目录
 
