@@ -26,6 +26,8 @@ Windows 下双击 `zen-dock.ps1` 也行（支持 `-Restart` 先杀掉占用端�
 
 配置在 `hub.config.json`，可以直接手改，改完自动热重载；也可以在页面上点「+ 添加」改，两边同步。
 
+首次运行时如果 `hub.config.json` 不存在，会自动从 `hub.config.example.json` 复制一份。**`hub.config.json` 不进仓库**——它含本机绝对路径，属于个人配置。模板里的路径写成 `./` 开头就按项目根解析，所以示例页面跨机器也能直接打开。
+
 ## 三种 item
 
 | kind | 干什么 | 关键字段 |
@@ -100,10 +102,11 @@ hub 重启后，之前跑着的服务不会丢：
 ## 目录
 
 ```
-index.mjs          入口
-zen-dock.ps1       双击启动
-hub.config.json    配置（手改 / 页面改都行）
-hub.state.json     运行时 pid，自动写
+index.mjs                    入口
+zen-dock.ps1                 双击启动
+hub.config.example.json      配置模板（进仓库）
+hub.config.json              你的实际配置（不进仓库，首次运行自动生成）
+hub.state.json               运行时 pid，自动写（不进仓库）
 lib/
   server.js        路由 + Origin 校验 + SSE
   config.js        配置读写校验（原子写）

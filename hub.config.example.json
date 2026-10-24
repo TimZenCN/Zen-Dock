@@ -1,0 +1,49 @@
+{
+  "host": "127.0.0.1",
+  "port": 7717,
+  "logLines": 500,
+  "startTimeoutMs": 15000,
+  "items": [
+    {
+      "id": "demo",
+      "kind": "page",
+      "name": "示例页面",
+      "dir": "./sites/demo",
+      "entry": "index.html"
+    },
+    {
+      "id": "my-service",
+      "kind": "service",
+      "name": "我的常驻服务",
+      "cmd": "node",
+      "args": [
+        "index.mjs"
+      ],
+      "cwd": "C:/path/to/your/project",
+      "port": 8787,
+      "url": "http://127.0.0.1:8787/"
+    },
+    {
+      "id": "my-script",
+      "kind": "script",
+      "name": "我的一次性脚本",
+      "shell": "python",
+      "path": "C:/path/to/your/script.py",
+      "cwd": "C:/path/to/your/project",
+      "params": [
+        {
+          "name": "verbose",
+          "flag": "--verbose",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "name": "limit",
+          "flag": "--limit",
+          "type": "number",
+          "default": 100
+        }
+      ]
+    }
+  ]
+}

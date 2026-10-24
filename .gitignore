@@ -1,6 +1,16 @@
+# 运行时状态：pid 记录，本机专属
 hub.state.json
 hub.state.json.tmp
+
+# 本地配置：含本机绝对路径，不能进仓库。模板见 hub.config.example.json
+hub.config.json
 hub.config.json.tmp
+
+# 静态页面：只保留 demo，其余是个人内容
+sites/*
+!sites/demo/
+
+# 依赖与杂项
 node_modules/
 *.log
 .DS_Store
