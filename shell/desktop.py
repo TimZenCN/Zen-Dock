@@ -299,7 +299,7 @@ def _quad_points(p0, ctrl, p1, n):
     return out
 
 
-def _sector_polygon(cx, cy, R, r, rc, a1, a2, steps=18):
+def _sector_polygon(cx, cy, R, r, rc, a1, a2, steps=60):
     """圆角扇形的多边形顶点。
 
     跟 panel.js 里 sectorPath 用同一套算法（外弧 → 外角圆角 → 径向边 →
@@ -319,15 +319,15 @@ def _sector_polygon(cx, cy, R, r, rc, a1, a2, steps=18):
     for i in range(steps + 1):
         deg = (a1 + dout) + ((a2 - dout) - (a1 + dout)) * i / steps
         pts.append(pt(R, deg))
-    pts += _quad_points(pt(R, a2 - dout), pt(R, a2), pt(R - rc, a2), 4)
+    pts += _quad_points(pt(R, a2 - dout), pt(R, a2), pt(R - rc, a2), 7)
     pts.append(pt(r + rc, a2))
-    pts += _quad_points(pt(r + rc, a2), pt(r, a2), pt(r, a2 - din), 4)
+    pts += _quad_points(pt(r + rc, a2), pt(r, a2), pt(r, a2 - din), 7)
     for i in range(steps + 1):
         deg = (a2 - din) - ((a2 - din) - (a1 + din)) * i / steps
         pts.append(pt(r, deg))
-    pts += _quad_points(pt(r, a1 + din), pt(r, a1), pt(r + rc, a1), 4)
+    pts += _quad_points(pt(r, a1 + din), pt(r, a1), pt(r + rc, a1), 7)
     pts.append(pt(R - rc, a1))
-    pts += _quad_points(pt(R - rc, a1), pt(R, a1), pt(R, a1 + dout), 4)
+    pts += _quad_points(pt(R - rc, a1), pt(R, a1), pt(R, a1 + dout), 7)
     return pts
 
 
@@ -646,6 +646,34 @@ class App:
             threading.Thread(target=self._apply_ring_region, args=(win,), daemon=True).start()
         threading.Thread(target=self._watch_dock_focus, args=(win,), daemon=True).start()
 
+    def _paint_form_backdrop(self, win) -> None:
+        """把 WinForms 窗体底色设成扇形填充色。
+
+        这不是"换个颜色掩盖"，是原理上必须的一步。
+
+        WebView2 的 DefaultBackgroundColor 只接受 alpha=0 或 255（传半透明会
+        直接 E_INVALIDARG）。alpha=0 时它**把宿主窗口自己的像素当作背景来渲染**
+        —— 也就是说 SVG 的抗锯齿像素混的是 Form.BackColor，不是桌面。
+
+        Form 的默认底色是 SystemColors.Control = #F0F0F0（浅灰），而
+        transparent=True 那个分支只设了 WebView2 的背景，从来没设过 Form 的
+        BackColor。所以：区域内凡是 SVG 没覆盖到的地方（抗锯齿带、区域外扩的
+        那 1.5px）露出来的都是浅灰，跨任何桌面背景都不变 —— 这就是那条
+        "奇怪的底边"，也是为什么换背景色没用。
+
+        把宿主底色设成和扇形 fill 完全一样的 #161b26，抗锯齿就变成
+        "扇形色 over 扇形色"，过渡带自然消失。
+        """
+        try:
+            import clr  # pythonnet，pywebview 启动时已加载
+            clr.AddReference("System.Drawing")
+            from System.Drawing import Color
+
+            win.native.BackColor = Color.FromArgb(22, 27, 38)  # #161b26
+            log("窗体底色已设为 #161b26（= 扇形 fill）")
+        except Exception as e:
+            log(f"设置窗体底色失败（不影响使用）：{type(e).__name__}: {e}")
+
     def _apply_ring_region(self, win) -> None:
         """等窗口真正创建出来，再把它裁成环形。
 
@@ -653,6 +681,8 @@ class App:
         （实测请求 400x400 拿到过 384x361），SVG 那边用 preserveAspectRatio
         居中缩放，所以按 min(w,h)/400 折算才对得上。
         """
+        self._paint_form_backdrop(win)
+
         hwnd = 0
         for _ in range(40):
             time.sleep(0.05)
