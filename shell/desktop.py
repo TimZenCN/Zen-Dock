@@ -348,21 +348,23 @@ def set_sectors_region(hwnd: int, w: int, h: int, count: int,
     任何东西覆盖，露出的就是 WinForms 窗体的默认背景色（#F0F0F0）——也就是
     肉眼看到的"白边"。改成扇形并集后，间隙和环外一起被剔除，真正透明。
 
-    区域要**内缩** 1px，不能外扩：
+    区域要**外扩** 1.5px，把 SVG 的抗锯齿像素完整包进来。
 
-    - 外扩 → 多出来的像素没有内容覆盖，露出窗体底色（浅灰）= 白边
-    - 正好重合 → 路径上的描边和抗锯齿是半透明的，跟背景混色，
-      在浅色背景上同样显成一圈浅边
-    - 内缩 1px → 区域内全是实心填充色，边缘锐利干净，代价是视觉小 1px（看不出）
+    这里的原理是：窗口背景本来就是透明的（WebView2 的 DComp 视觉树直出，
+    Form 的 BackColor 根本不参与合成），所以区域内、扇形之外多出来的那
+    1.5px 会正常透出桌面，不会露任何底色。
 
-    代价是抗锯齿被裁掉了，边缘会硬一点。深色 UI 上锐利边缘比"半透明过渡
-    到背景"好看得多。
+    反过来，如果内缩，就会把抗锯齿带一刀切掉 —— 边缘变成硬阶梯，
+    每一级都露着背景色，在浅色桌面上看起来就是一圈毛边。
+
+    外扩的前提是区域为"扇形并集"而不是"完整环形"：环形会把扇区之间的
+    间隙也包进去，那些间隙没有内容覆盖，才会露出窗体底色。
     """
     cx, cy = w // 2, h // 2
     step = 360.0 / max(1, count)
     half = min(step / 2 - 2.5, max_half)
-    R = r_out - 1.0
-    r = max(2.0, r_in + 1.0)
+    R = r_out + 1.5
+    r = max(2.0, r_in - 1.5)
 
     total = None
     try:
@@ -644,25 +646,6 @@ class App:
             threading.Thread(target=self._apply_ring_region, args=(win,), daemon=True).start()
         threading.Thread(target=self._watch_dock_focus, args=(win,), daemon=True).start()
 
-    def _paint_form_dark(self, win) -> None:
-        """把 WinForms 窗体的底色刷成深色。
-
-        这是最后一道保险：pywebview 的 transparent=True 只给 WebView2 设了
-        透明背景，**没有设 Form 自己的 BackColor**，所以任何没被网页内容覆盖的
-        像素露出来的都是 SystemColors.Control（#F0F0F0，浅灰）。
-        不管命中区域怎么裁，把底色改成深色都能保证露出来的不是白的。
-        """
-        try:
-            import clr  # pythonnet，pywebview 启动时已经加载
-
-            clr.AddReference("System.Drawing")
-            from System.Drawing import Color
-
-            win.native.BackColor = Color.FromArgb(11, 14, 20)
-            log("窗体底色已设为 #0b0e14")
-        except Exception as e:
-            log(f"设置窗体底色失败（不影响使用）：{type(e).__name__}: {e}")
-
     def _apply_ring_region(self, win) -> None:
         """等窗口真正创建出来，再把它裁成环形。
 
@@ -670,8 +653,6 @@ class App:
         （实测请求 400x400 拿到过 384x361），SVG 那边用 preserveAspectRatio
         居中缩放，所以按 min(w,h)/400 折算才对得上。
         """
-        self._paint_form_dark(win)
-
         hwnd = 0
         for _ in range(40):
             time.sleep(0.05)
