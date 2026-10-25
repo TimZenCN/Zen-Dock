@@ -46,11 +46,15 @@ DESKTOP_LOG = SHELL / "desktop.log"
 IS_WIN = os.name == "nt"
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
 
-DOCK_W, DOCK_H = 560, 430
+DOCK_W, DOCK_H = 560, 430      # 面板形态
+RING_W, RING_H = 400, 400      # 圆环形态，正方形
+# 圆环的命中区域比视觉外扩 6px，留给 SetWindowRgn 硬裁剪边缘的抗锯齿
+RING_OUT, RING_IN = 190, 60
 DOCK_TITLE = "Zen-Dock 快速启动"
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+gdi32 = ctypes.windll.gdi32
 
 
 def setup_logging() -> None:
@@ -241,6 +245,43 @@ class MONITORINFO(ctypes.Structure):
     ]
 
 
+def cursor_center(w: int, h: int) -> tuple[int, int]:
+    """窗口左上角，让鼠标落在窗口正中心。
+
+    故意不做贴边 clamp：一旦把窗口往里推，圆心就跟鼠标错开了，
+    圆环就不是"围绕鼠标"了。贴边时宁可让窗口超出屏幕。
+    """
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x - w // 2, pt.y - h // 2
+
+
+RGN_DIFF = 4
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+
+
+def set_ring_region(hwnd: int, w: int, h: int, outer: int, inner: int) -> bool:
+    """把窗口的命中区域裁成环形。
+
+    区域外的像素既不被绘制也不接收鼠标，点击会直接穿透到下面的窗口——
+    这是透明圆环能做出来的关键。没有它，鼠标下面会有一块看不见的矩形
+    挡住桌面，而且窗口永远不失焦，失焦自动关闭也就失效了。
+    """
+    cx, cy = w // 2, h // 2
+    r_out = gdi32.CreateEllipticRgn(cx - outer, cy - outer, cx + outer, cy + outer)
+    r_in = gdi32.CreateEllipticRgn(cx - inner, cy - inner, cx + inner, cy + inner)
+    if not r_out or not r_in:
+        log("CreateEllipticRgn 失败")
+        return False
+    try:
+        gdi32.CombineRgn(r_out, r_out, r_in, RGN_DIFF)
+        user32.SetWindowRgn(hwnd, r_out, True)
+    finally:
+        gdi32.DeleteObject(r_in)
+    return True
+
+
 def cursor_anchor(w: int, h: int) -> tuple[int, int]:
     """把窗口放在鼠标右下角；贴边时翻到内侧。多屏按鼠标所在屏的工作区算。"""
     pt = wintypes.POINT()
@@ -353,29 +394,32 @@ class Api:
     def __init__(self, app: "App") -> None:
         self._app = app
 
-    def close(self):
+    # 注意：pywebview 调 js_api 时总会额外塞一个参数进来（实测如此），
+    # 所以无参方法必须收 *_，否则 TypeError: takes 1 positional argument but 2 were given。
+
+    def close(self, *_):
         self._app.close_dock()
         return True
 
-    def show_logs(self, item_id: str):
+    def show_logs(self, item_id: str, *_):
         self._app.close_dock()
         self._app.show_main()
         self._app.call_main_js("openDrawer", item_id)
         return True
 
-    def show_edit(self, item_id: str):
+    def show_edit(self, item_id: str, *_):
         self._app.close_dock()
         self._app.show_main()
         self._app.call_main_js("openEditor", item_id)
         return True
 
-    def set_hotkey(self, spec: str):
+    def set_hotkey(self, spec: str, *_):
         return self._app.set_hotkey(spec)
 
-    def hotkey_status(self):
+    def hotkey_status(self, *_):
         return self._app.hotkey_status()
 
-    def open_dock(self):
+    def open_dock(self, *_):
         self._app.open_dock()
         return True
 
@@ -433,21 +477,35 @@ class App:
             return
         import webview
 
-        x, y = cursor_anchor(DOCK_W, DOCK_H)
+        # 形态每次现读配置，设置页改完下次唤出就生效
+        ring = (read_settings().get("dockMode") or "ring") == "ring"
+        if ring:
+            w, h = RING_W, RING_H
+            x, y = cursor_center(w, h)
+            extra = dict(
+                transparent=True,
+                shadow=False,
+                background_color="#000000",
+            )
+        else:
+            w, h = DOCK_W, DOCK_H
+            x, y = cursor_anchor(w, h)
+            extra = dict(background_color="#0b0e14")
+
         try:
             win = webview.create_window(
                 DOCK_TITLE,
                 url=f"http://{self.host}:{self.port}/dock",
-                width=DOCK_W,
-                height=DOCK_H,
+                width=w,
+                height=h,
                 x=x,
                 y=y,
                 frameless=True,
                 easy_drag=False,
                 on_top=True,
                 resizable=False,
-                background_color="#0b0e14",
                 js_api=self.api,
+                **extra,
             )
         except Exception as e:
             log(f"打开拓展坞失败：{e}")
@@ -456,8 +514,48 @@ class App:
 
         self.dock = win
         win.events.closed += self._on_dock_closed
-        log(f"拓展坞已打开 ({x},{y})")
+        log(f"拓展坞已打开 ({x},{y}) 形态={'圆环' if ring else '面板'}")
+        if ring:
+            threading.Thread(target=self._apply_ring_region, args=(win,), daemon=True).start()
         threading.Thread(target=self._watch_dock_focus, args=(win,), daemon=True).start()
+
+    def _apply_ring_region(self, win) -> None:
+        """等窗口真正创建出来，再把它裁成环形。
+
+        半径按窗口实际尺寸换算：无边框窗口的最终大小不一定等于请求值
+        （实测请求 400x400 拿到过 384x361），SVG 那边用 preserveAspectRatio
+        居中缩放，所以按 min(w,h)/400 折算才对得上。
+        """
+        hwnd = 0
+        for _ in range(40):
+            time.sleep(0.05)
+            hits = find_windows(DOCK_TITLE)
+            if hits:
+                hwnd = hits[0]
+                break
+        if not hwnd:
+            log("没找到坞窗口，跳过环形区域（点击环外不会穿透）")
+            return
+
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+
+        # 先试着把尺寸掰回正方形，掰不动就用实际尺寸折算
+        if (w, h) != (RING_W, RING_H):
+            user32.SetWindowPos(
+                hwnd, 0, rect.left, rect.top, RING_W, RING_H,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            time.sleep(0.06)
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w, h = rect.right - rect.left, rect.bottom - rect.top
+
+        scale = min(w, h) / float(RING_W)
+        outer = max(1, int(round(RING_OUT * scale)))
+        inner = max(1, int(round(RING_IN * scale)))
+        ok = set_ring_region(hwnd, w, h, outer, inner)
+        log(f"环形区域 {'已设置' if ok else '设置失败'} 窗口 {w}x{h} 外 {outer} 内 {inner}")
 
     def _on_dock_closed(self) -> None:
         self.dock = None
@@ -515,11 +613,18 @@ class App:
         while self.dock is win and not self.quitting:
             time.sleep(0.22)
             fg = user32.GetForegroundWindow()
-            if fg != hwnd:
-                titles = find_windows(DOCK_TITLE)
-                log(f"拓展坞失焦（前台 hwnd={fg}，坞 hwnd={hwnd}，坞仍存在={bool(titles)}）")
-                self.close_dock()
-                return
+            # fg == 0 表示"当前没有前台窗口"（切到任务栏、切换虚拟桌面、
+            # 或者从没有前台权限的进程里启动时都会这样）。这不算失焦，
+            # 否则坞刚弹出来就会被自己关掉。
+            if fg and fg != hwnd:
+                # 再确认一次：焦点在窗口创建、动画、托盘气泡这些时机上会瞬时抖动，
+                # 一次就关会让坞"闪一下就没了"。0.35 秒后还是别人，才算真失焦。
+                time.sleep(0.35)
+                fg2 = user32.GetForegroundWindow()
+                if fg2 and fg2 != hwnd:
+                    log(f"拓展坞失焦（前台 hwnd={fg2}，坞 hwnd={hwnd}）")
+                    self.close_dock()
+                    return
 
     # ---- 热键 ----
     def start_hotkey(self) -> None:
