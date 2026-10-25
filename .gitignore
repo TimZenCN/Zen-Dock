@@ -21,6 +21,10 @@ __pycache__/
 # install-cli.ps1 备份的用户 PATH，含本机全部目录结构
 shell/path-backup-*.txt
 
+# 诊断脚本的产出：截图和临时页面，跑一次就生成，不该进仓库
+test-scripts/*.png
+test-scripts/*.html
+
 # 依赖与杂项
 node_modules/
 *.log
