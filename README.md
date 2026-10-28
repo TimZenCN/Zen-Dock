@@ -34,6 +34,15 @@ Windows 下双击 `zen-dock.ps1` 也行（支持 `-Restart` 先杀掉占用端�
 
 窗口是原生 WinForms 窗口 + 系统 WebView2 渲染，不是浏览器套壳：自己的标题栏、自己的图标、自己的大小和位置。
 
+**窗口是无边框的**（`frameless=True`），标题栏和三个窗口按钮都由页面自己画：
+
+- 拖标题栏移动窗口——把这次按下交给系统的「拖动标题栏」处理（`PostMessage(WM_NCLBUTTONDOWN, HTCAPTION)`），所以 Aero Snap 照样有效，也不会有自己实现拖动时那种跟手延迟。用 `PostMessage` 而不是 `SendMessage`：js_api 跑在 UI 线程上，`SendMessage` 会同步等移动循环结束，直接卡死界面。
+- 双击标题栏最大化 / 还原；四边四角有 4~10px 缩放热区，对应系统的 `HTLEFT` / `HTBOTTOMRIGHT` 等命中码
+- 最大化是手工 `SetWindowPos` 铺满**工作区**，不是 `SW_MAXIMIZE`——无边框窗口调 `SW_MAXIMIZE` 会盖住任务栏
+- **边框内化**：系统边框去掉后，边界感由页面自己给——`body::after` 一圈 `box-shadow: inset 0 0 0 1px`。用 inset 阴影而不是 `border`，因为它不占布局、不吃点击，也不会让 sticky 的标题栏错位
+
+浏览器里打开同一个页面时这些全部不生效（`markShell()` 认不到 `window.pywebview.api.win_drag`），标题栏按钮自动隐藏，页面退化成普通网页。
+
 关掉窗口之后干什么，在**设置**里选：
 
 - **退出程序**（默认）—— 连自己启动的服务一起停掉
@@ -52,6 +61,17 @@ pythonw shell/desktop.py --hidden
 ```
 
 不显示主窗口，直接进托盘，靠热键或托盘图标唤出。**开机自启注册的就是这个模式**，所以开机不会弹窗。
+
+### 单实例
+
+同一时间只允许一个外壳在跑。
+
+判定用命名互斥体 `Local\Zen-Dock-Shell`——内核对象，进程一死自动释放，不会留下脏锁（用锁文件就会）。唤醒用本地 TCP 小口子：第一个实例把系统分配的随机端口写进 `shell/instance.json`，后来者连上去发一句 `show`，第一实例把主窗口叫出来，然后自己退出。
+
+- 手动再启动一次 = 唤起已有窗口，**不会再出现第二个托盘图标和热键冲突**
+- `--hidden`（开机自启）遇到已有实例直接静默退出，不打扰正在跑的那个
+- 唤醒口连不上时降级成 Win32 直接 `ShowWindow + SetForegroundWindow`
+- 端口故意不用 `hubPort + 1` 这种固定值，也不用 `SO_REUSEADDR`：前者被别的程序占住就永久失效，后者在 Windows 上允许抢占别人已监听的端口，会出现「两个实例都绑成功、请求随机落到一个」的鬼事
 
 ### 拓展坞
 
@@ -353,6 +373,16 @@ hub 重启后，之前跑着的服务不会丢：
 
 接管来的进程停止时一样是强杀整棵树。
 
+### 启动去重：同一条命令只留一个
+
+端口探活只能发现「正在监听」的重复实例——不带端口的服务、或者进程卡在启动阶段的重复实例，它看不见。所以点「启动」时会额外扫一次全量进程命令行（PowerShell + CIM，`wmic` 在新版 Windows 上已经被移除了），发现同一条命令已经在跑就**直接接管，不再 spawn 第二个**。
+
+匹配用的是命令行指纹而不是全等：可执行体名必须出现（`node` / `node.exe` / 绝对路径都认），配置里每个参数 token 都要在命令行里出现，参数顺序无关，正反斜杠归一化后再比。判错两个方向都难受——漏判会起两个，误判会接管别人的进程。
+
+要关掉这个行为（比如故意想跑两份），在 item 上加 `"dedupe": false`。
+
+并发启动时共享同一次扫描（in-flight 共享），不会 N 个服务排队等 N 次 PowerShell 冷启动。
+
 ## 安全
 
 只绑 `127.0.0.1`，另外校验 `Origin` 和 `Sec-Fetch-Site`。
@@ -444,6 +474,24 @@ node test-scripts/smoke.mjs
 把 `renderPanel()` 导出成静态页、注入 mock 数据、分别截主页 / 设置 / 快捷坞 / 关于四张图。改 UI 之后用它快速看效果，不用反复开关窗口。
 
 注意 `--window-size` 在 Windows 上会被 Chrome 的最小窗口宽度限制（约 500），所以 headless 截图的坐标不能用来量几何——量尺寸要用真实窗口 + `PrintWindow`。
+
+**进程去重**（纯逻辑 + 真起进程，不需要外壳）：
+
+```bash
+node test-scripts/dedupe.mjs        # 命令行指纹匹配，9 项
+node test-scripts/dedupe-e2e.mjs    # 已在跑的进程被接管而不是起第二个，7 项
+```
+
+`dedupe-e2e` 会临时改写 `hub.state.json`，结束时还原。
+
+**抓真实窗口的画面**（外壳在跑的时候）：
+
+```bash
+.venv/Scripts/python.exe test-scripts/shot_panel.py          # 主窗口
+.venv/Scripts/python.exe test-scripts/shot_panel.py dock     # 拓展坞
+```
+
+比 Chrome headless 可靠：拿到的就是屏幕最终合成结果，能验证无边框、内描边这类只有真实窗口才有的东西。
 
 ## 环境
 

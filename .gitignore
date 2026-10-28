@@ -15,6 +15,8 @@ sites/*
 .webview/
 shell/desktop.log
 shell/server.log
+shell/instance.json
+shell/instance.json.tmp
 __pycache__/
 *.pyc
 

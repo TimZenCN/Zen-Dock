@@ -42,6 +42,7 @@ ICON_PNG = SHELL / "icon.png"
 WEBVIEW_DATA = ROOT / ".webview"
 SERVER_LOG = SHELL / "server.log"
 DESKTOP_LOG = SHELL / "desktop.log"
+INSTANCE_FILE = SHELL / "instance.json"   # 单实例的唤醒口地址，随进程生灭
 
 IS_WIN = os.name == "nt"
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
@@ -54,6 +55,26 @@ RING_MAX_HALF = 34
 MAIN_TITLE = "Zen-Dock"
 DOCK_TITLE = "Zen-Dock 快速启动"
 SW_RESTORE = 9
+SW_MINIMIZE = 6
+SW_HIDE = 0
+
+# 单实例互斥体。Local\ 只作用于当前登录会话，正是我们要的范围：
+# 同一台机器上不同用户各开一个互不干扰。
+MUTEX_NAME = "Local\\Zen-Dock-Shell"
+ERROR_ALREADY_EXISTS = 183
+STILL_ACTIVE = 259
+
+# 无边框窗口的自绘拖动/缩放：把命中测试交给系统的非客户区处理，
+# 效果和拖标题栏、拖边框完全一样（有 Aero Snap，不抖）。
+WM_NCLBUTTONDOWN = 0x00A1
+HTCAPTION = 2
+HT_LEFT, HT_RIGHT, HT_TOP = 10, 11, 12
+HT_TOPLEFT, HT_TOPRIGHT, HT_BOTTOM = 13, 14, 15
+HT_BOTTOMLEFT, HT_BOTTOMRIGHT = 16, 17
+HT_DIRS = {
+    "w": HT_LEFT, "e": HT_RIGHT, "n": HT_TOP, "s": HT_BOTTOM,
+    "nw": HT_TOPLEFT, "ne": HT_TOPRIGHT, "sw": HT_BOTTOMLEFT, "se": HT_BOTTOMRIGHT,
+}
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -248,6 +269,150 @@ def force_foreground(hwnd: int) -> bool:
     except Exception as e:
         log(f"抢前台失败：{e}")
         return False
+
+
+# ---------- 单实例 ----------
+#
+# 判据用命名互斥体（内核对象，进程一死就自动释放，不会留脏锁），
+# 唤醒用本地 TCP 小口子（第一实例把端口写进 instance.json）。
+# 为什么不用 FindWindow 当判据：坞窗口、主窗口都叫 Zen-Dock*，而且窗口可能
+# 被隐藏，靠标题猜不可靠。互斥体是唯一的权威判定。
+
+_instance_mutex = None  # 必须常驻引用，句柄一被回收互斥体就没了
+
+
+def acquire_instance_lock() -> bool:
+    """第一个实例返回 True；已有实例在跑返回 False。"""
+    global _instance_mutex
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        _instance_mutex = k32.CreateMutexW(None, False, MUTEX_NAME)
+        if not _instance_mutex:
+            log("CreateMutexW 失败，按单实例放行")
+            return True
+        return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+    except Exception as e:
+        log(f"单实例检测异常（放行）：{e}")
+        return True
+
+
+def pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    try:
+        h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = wintypes.DWORD()
+        ok = kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        kernel32.CloseHandle(h)
+        return bool(ok) and code.value == STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def read_instance() -> dict:
+    try:
+        return json.loads(INSTANCE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def write_instance(wake_port: int) -> None:
+    try:
+        INSTANCE_FILE.write_text(
+            json.dumps(
+                {"pid": os.getpid(), "wake": wake_port, "startedAt": int(time.time() * 1000)},
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log(f"写 instance.json 失败（唤醒通道仍可用）：{e}")
+
+
+def clear_instance() -> None:
+    """只删自己写的，别把后起的实例的登记删掉。"""
+    try:
+        if read_instance().get("pid") == os.getpid():
+            INSTANCE_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def start_wake_server(on_show) -> int:
+    """起一个只认 show 的本地小口子，返回实际端口（失败 0）。
+
+    故意用系统分配的随机端口 + instance.json 记录，而不是固定 port+1：
+    固定端口一旦被别的程序占住，唤醒就永久失效，而随机端口不会冲突。
+    """
+    srv = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # 不设 SO_REUSEADDR：Windows 上它允许抢占别人已经监听的端口，
+        # 会出现"两个实例都绑成功、请求随机落到一个"的鬼事。
+        s.bind(("127.0.0.1", 0))
+        s.listen(4)
+        srv = s
+    except OSError as e:
+        log(f"唤醒口绑定失败：{e}")
+        return 0
+
+    def loop() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(1.5)
+                    data = conn.recv(64).strip().lower()
+                    if data.startswith(b"show"):
+                        log("收到唤醒请求，显示主窗口")
+                        on_show()
+                        conn.sendall(b"ok\n")
+                    elif data.startswith(b"ping"):
+                        conn.sendall(b"ok\n")
+                    else:
+                        conn.sendall(b"?\n")
+                except Exception:
+                    pass
+
+    threading.Thread(target=loop, daemon=True).start()
+    return srv.getsockname()[1]
+
+
+def wake_existing(timeout: float = 4.0) -> bool:
+    """叫醒已经在跑的实例：先走唤醒口，再降级到 Win32 直接显示窗口。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        info = read_instance()
+        port, pid = int(info.get("wake") or 0), int(info.get("pid") or 0)
+        if port and pid_alive(pid):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1.5) as s:
+                    s.sendall(b"show\n")
+                    s.settimeout(1.0)
+                    if s.recv(8).strip() == b"ok":
+                        log(f"已通过唤醒口叫起实例 pid={pid}")
+                        return True
+            except Exception as e:
+                log(f"唤醒口没通（{type(e).__name__}），改试 Win32")
+                break
+        # 第一个实例可能还在启动、没写登记文件，给它一点时间
+        time.sleep(0.25)
+
+    hits = find_windows(MAIN_TITLE)
+    if hits:
+        user32.ShowWindow(hits[0], SW_RESTORE)
+        force_foreground(hits[0])
+        log("已用 Win32 直接唤起已有窗口")
+        return True
+    log("找不到已有实例的窗口")
+    return False
 
 
 # ---------- 鼠标附近定位 ----------
@@ -537,6 +702,30 @@ class Api:
         self._app.open_dock()
         return True
 
+    # ---- 自绘标题栏（主窗口是无边框的，这些是它唯一的窗口按钮通路）----
+
+    def win_drag(self, *_):
+        self._app.begin_drag()
+        return True
+
+    def win_resize(self, direction: str, *_):
+        self._app.begin_resize(direction)
+        return True
+
+    def win_minimize(self, *_):
+        self._app.minimize_main()
+        return True
+
+    def win_maximize(self, *_):
+        return self._app.toggle_maximize_main()
+
+    def win_close(self, *_):
+        self._app.close_main()
+        return True
+
+    def win_state(self, *_):
+        return {"maximized": bool(self._app.maxed)}
+
 
 class App:
     def __init__(self, port: int, host: str) -> None:
@@ -549,6 +738,135 @@ class App:
         self.hotkey_want = read_settings().get("hotkey") or "alt+x"
         self.quitting = False
         self.api = Api(self)
+        self._main_hwnd = 0        # 主窗口句柄缓存
+        self.maxed = False         # 自绘最大化状态（无边框窗口不能靠 IsZoomed 判断）
+        self._restore_rect = None  # 最大化前的窗口矩形
+
+    # ---- 主窗口的窗口操作（无边框，全部走 Win32）----
+    def main_hwnd(self) -> int:
+        """主窗口句柄。句柄会随窗口重建失效，所以每次都验一下。"""
+        if self._main_hwnd and user32.IsWindow(self._main_hwnd):
+            return self._main_hwnd
+        hits = find_windows(MAIN_TITLE)
+        self._main_hwnd = hits[0] if hits else 0
+        return self._main_hwnd
+
+    def begin_drag(self) -> None:
+        """把这次按下交给系统的"拖动标题栏"处理。
+
+        必须用 PostMessage 而不是 SendMessage：js_api 是在 UI 线程上执行的，
+        SendMessage 会同步等移动循环结束，直接把界面卡死。
+        """
+        hwnd = self.main_hwnd()
+        if not hwnd:
+            log("begin_drag: 找不到主窗口句柄")
+            return
+        try:
+            if self.maxed:
+                self._unmaximize(hwnd, follow_cursor=True)
+            user32.ReleaseCapture()
+            user32.PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+        except Exception as e:
+            log(f"拖动失败：{e}")
+
+    def begin_resize(self, direction: str) -> None:
+        hwnd = self.main_hwnd()
+        if not hwnd:
+            return
+        if self.maxed:  # 最大化状态下不许拉边
+            return
+        code = HT_DIRS.get((direction or "").strip().lower())
+        if code is None:
+            log(f"未知的缩放方向：{direction}")
+            return
+        try:
+            user32.ReleaseCapture()
+            user32.PostMessageW(hwnd, WM_NCLBUTTONDOWN, code, 0)
+        except Exception as e:
+            log(f"缩放失败：{e}")
+
+    def minimize_main(self) -> None:
+        hwnd = self.main_hwnd()
+        if not hwnd:
+            return
+        # 无边框窗口的最小化按钮不一定在任务栏，托盘得先就位，否则用户找不回来
+        self.tray.ensure(self)
+        try:
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
+            log("主窗口已最小化")
+        except Exception as e:
+            log(f"最小化失败：{e}")
+
+    def _work_area(self, hwnd: int):
+        hmon = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return None
+        return mi.rcWork
+
+    def _unmaximize(self, hwnd: int, follow_cursor: bool = False) -> None:
+        self.maxed = False
+        rect = self._restore_rect
+        if not rect:
+            return
+        x, y, w, h = rect
+        if follow_cursor:
+            # 拖动还原时让窗口跟着鼠标走，跟系统标题栏的行为一致
+            pt = wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            x = pt.x - w // 2
+            y = pt.y - 14
+        user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+
+    def toggle_maximize_main(self) -> dict:
+        hwnd = self.main_hwnd()
+        if not hwnd:
+            return {"maximized": self.maxed}
+        try:
+            if self.maxed:
+                self._unmaximize(hwnd)
+            else:
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                self._restore_rect = (
+                    rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+                )
+                work = self._work_area(hwnd)
+                if work is None:
+                    return {"maximized": False}
+                # 不用 SW_MAXIMIZE：无边框窗口最大化会盖住任务栏，
+                # 手工铺满工作区才跟普通窗口的观感一致。
+                user32.SetWindowPos(
+                    hwnd, 0, work.left, work.top,
+                    work.right - work.left, work.bottom - work.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+                self.maxed = True
+            log(f"主窗口{'最大化' if self.maxed else '还原'}")
+        except Exception as e:
+            log(f"最大化切换失败：{e}")
+        return {"maximized": self.maxed}
+
+    def close_main(self) -> None:
+        """自绘的关闭按钮。语义必须和系统关闭按钮（on_closing）一致。"""
+        if self.quitting:
+            return
+        action = read_settings().get("closeAction", "quit")
+        if action == "tray":
+            if self.tray.ensure(self):
+                try:
+                    self.main.hide()
+                except Exception as e:
+                    log(f"pywebview 隐藏失败，改走 Win32：{e}")
+                # 兜底：WinForms 的 hide() 在某些时序下不生效，窗口会赖在屏幕上
+                hwnd = self.main_hwnd()
+                if hwnd and user32.IsWindowVisible(hwnd):
+                    user32.ShowWindow(hwnd, SW_HIDE)
+                log("已最小化到托盘")
+                return
+            log("托盘不可用，改为直接退出")
+        self.request_quit()
 
     # ---- 窗口 ----
     def show_main(self) -> None:
@@ -646,8 +964,8 @@ class App:
             threading.Thread(target=self._apply_ring_region, args=(win,), daemon=True).start()
         threading.Thread(target=self._watch_dock_focus, args=(win,), daemon=True).start()
 
-    def _paint_form_backdrop(self, win) -> None:
-        """把 WinForms 窗体底色设成扇形填充色。
+    def _paint_form_backdrop(self, win, rgb=(22, 27, 38)) -> None:
+        """把 WinForms 窗体底色设成页面底色。
 
         这不是"换个颜色掩盖"，是原理上必须的一步。
 
@@ -657,20 +975,20 @@ class App:
 
         Form 的默认底色是 SystemColors.Control = #F0F0F0（浅灰），而
         transparent=True 那个分支只设了 WebView2 的背景，从来没设过 Form 的
-        BackColor。所以：区域内凡是 SVG 没覆盖到的地方（抗锯齿带、区域外扩的
+        BackColor。所以：区域内凡是页面没覆盖到的地方（抗锯齿带、区域外扩的
         那 1.5px）露出来的都是浅灰，跨任何桌面背景都不变 —— 这就是那条
         "奇怪的底边"，也是为什么换背景色没用。
 
-        把宿主底色设成和扇形 fill 完全一样的 #161b26，抗锯齿就变成
-        "扇形色 over 扇形色"，过渡带自然消失。
+        圆环坞传 #161b26（= 扇形 fill），主窗口传 #0b0e14（= --bg）。
+        底色和页面底色差 0，边缘过渡带自然消失。
         """
         try:
             import clr  # pythonnet，pywebview 启动时已加载
             clr.AddReference("System.Drawing")
             from System.Drawing import Color
 
-            win.native.BackColor = Color.FromArgb(22, 27, 38)  # #161b26
-            log("窗体底色已设为 #161b26（= 扇形 fill）")
+            win.native.BackColor = Color.FromArgb(*rgb)
+            log(f"窗体底色已设为 #{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}")
         except Exception as e:
             log(f"设置窗体底色失败（不影响使用）：{type(e).__name__}: {e}")
 
@@ -842,10 +1160,23 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--hidden", action="store_true", help="静默启动：不显示窗口，直接进托盘")
     parser.add_argument("--auto-close", type=float, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--multi", action="store_true", help=argparse.SUPPRESS)  # 跳过单实例判定，仅测试用
     args = parser.parse_args()
 
     log("=" * 50)
     log(f"Zen-Dock desktop shell{' (hidden)' if args.hidden else ''}")
+
+    # 单实例必须在 import webview 之前判：两个进程同时初始化 WebView2 的
+    # user data folder 会互相踩，甚至直接 E_ABORT。
+    if not args.multi and not acquire_instance_lock():
+        log("已有实例在跑，按单实例策略只保留一个")
+        if args.hidden:
+            log("这次是静默启动，直接退出（不打扰已在跑的那个）")
+        elif wake_existing():
+            log("已唤起已有实例，本进程退出")
+        else:
+            log("唤不起来，但也不再开第二个，本进程退出")
+        return 0
 
     import webview  # 放这里，出错时日志已经就绪
 
@@ -869,8 +1200,24 @@ def main() -> int:
         min_size=(900, 600),
         background_color="#0b0e14",
         hidden=args.hidden,
+        # 主窗口也是无边框：标题栏和窗口按钮由页面自绘（panel.js 的 #titlebar），
+        # 边框则内化成一圈 inset 描边，跟拓展坞的无边框风格统一。
+        frameless=True,
+        easy_drag=False,  # 拖动自己做，否则整页都能拖，点按钮会误拖窗口
+        shadow=False,
         js_api=app.api,
     )
+
+    # 主窗口有了对象才起唤醒口，避免第二个实例在窗口就绪前打进来打空
+    wake_port = start_wake_server(app.show_main)
+    write_instance(wake_port)
+    log(f"单实例已就位，唤醒口 127.0.0.1:{wake_port}")
+
+    def on_ready() -> None:
+        """WebView2 的宿主窗口这时才真正存在，可以刷底色了。"""
+        app._paint_form_backdrop(app.main, (11, 14, 20))  # #0b0e14 = --bg
+
+    app.main.events.loaded += on_ready
 
     def on_closing() -> bool:
         """返回 False 可以拦下这次关闭。"""
@@ -912,11 +1259,13 @@ def main() -> int:
         alert("Zen-Dock", f"窗口启动失败：\n{type(e).__name__}: {e}")
         app.hotkey.stop()
         app.tray.stop()
+        clear_instance()
         kill_tree(server_proc)
         return 1
 
     app.hotkey.stop()
     app.tray.stop()
+    clear_instance()
     log("窗口已关闭")
     kill_tree(server_proc)
     log("退出")
