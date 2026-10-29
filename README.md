@@ -36,9 +36,11 @@ Windows 下双击 `zen-dock.ps1` 也行（支持 `-Restart` 先杀掉占用端�
 
 **窗口是无边框的**（`frameless=True`），标题栏和三个窗口按钮都由页面自己画：
 
-- 拖标题栏移动窗口——把这次按下交给系统的「拖动标题栏」处理（`PostMessage(WM_NCLBUTTONDOWN, HTCAPTION)`），所以 Aero Snap 照样有效，也不会有自己实现拖动时那种跟手延迟。用 `PostMessage` 而不是 `SendMessage`：js_api 跑在 UI 线程上，`SendMessage` 会同步等移动循环结束，直接卡死界面。
-- 双击标题栏最大化 / 还原；四边四角有 4~10px 缩放热区，对应系统的 `HTLEFT` / `HTBOTTOMRIGHT` 等命中码
+- 拖标题栏移动窗口——JS 记下按下时的屏幕坐标，mousemove 算位移，`requestAnimationFrame` 节流后调 `win_drag_to`，Python 侧只负责 `SetWindowPos`。**不走系统移动循环**（`WM_NCLBUTTONDOWN + HTCAPTION`）：WebView2 在 mousedown 那一瞬间就把鼠标捕获抢到自己那个子窗口（`Chrome_WidgetWin_1`）上，之后移动循环收不到 mousemove，窗口一动不动——这是实测出来的，不是理论推演。pywebview 自己的 `easy_drag` 也是「JS 算位移 + SetWindowPos」这条路。
+- 代价是没有 Aero Snap（拖到屏幕边缘分屏），换来的是"一定能拖"。
+- 双击标题栏最大化 / 还原；四边四角 5px 内是缩放区，同样在 JS 侧算位移，Python 侧按方向改四条边。**命中判断按视口坐标算，不依赖热区元素**——最初用 8 个绝对定位的 `<i>` 做热区，点右下角没反应（事件落到了别处），改成 `edgeDir(x, y)` 就不会被任何层盖住。最小尺寸 900×600 由 `resize_to` 自己守，`FormBorderStyle.None` 之后 WinForms 的 `MinimumSize` 对 `SetWindowPos` 不生效。
 - 最大化是手工 `SetWindowPos` 铺满**工作区**，不是 `SW_MAXIMIZE`——无边框窗口调 `SW_MAXIMIZE` 会盖住任务栏
+- 标题栏底色比页面底色再深一档（`--bg-top: #080a10` vs `--bg: #0b0e14`），靠这点差值把标题栏和内容区分开
 - **边框内化**：系统边框去掉后，边界感由页面自己给——`body::after` 一圈 `box-shadow: inset 0 0 0 1px`。用 inset 阴影而不是 `border`，因为它不占布局、不吃点击，也不会让 sticky 的标题栏错位
 
 浏览器里打开同一个页面时这些全部不生效（`markShell()` 认不到 `window.pywebview.api.win_drag`），标题栏按钮自动隐藏，页面退化成普通网页。

@@ -64,10 +64,9 @@ MUTEX_NAME = "Local\\Zen-Dock-Shell"
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 
-# 无边框窗口的自绘拖动/缩放：把命中测试交给系统的非客户区处理，
-# 效果和拖标题栏、拖边框完全一样（有 Aero Snap，不抖）。
-WM_NCLBUTTONDOWN = 0x00A1
-HTCAPTION = 2
+# 无边框窗口的缩放方向。值用的是系统的 HTxxx 命中码，现在只当方向白名单使
+# （真正算新矩形的是 App.resize_to，因为系统拖边循环在 WebView2 上收不到
+# mousemove，见 begin_drag 的注释）。
 HT_LEFT, HT_RIGHT, HT_TOP = 10, 11, 12
 HT_TOPLEFT, HT_TOPRIGHT, HT_BOTTOM = 13, 14, 15
 HT_BOTTOMLEFT, HT_BOTTOMRIGHT = 16, 17
@@ -441,6 +440,7 @@ def cursor_center(w: int, h: int) -> tuple[int, int]:
 
 
 RGN_DIFF = 4
+SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 
@@ -704,13 +704,23 @@ class Api:
 
     # ---- 自绘标题栏（主窗口是无边框的，这些是它唯一的窗口按钮通路）----
 
-    def win_drag(self, *_):
-        self._app.begin_drag()
-        return True
+    def win_drag_begin(self, *_):
+        return self._app.begin_drag()
 
-    def win_resize(self, direction: str, *_):
-        self._app.begin_resize(direction)
-        return True
+    def win_drag_to(self, dx: float, dy: float, *_):
+        return self._app.drag_to(dx, dy)
+
+    def win_drag_end(self, *_):
+        return self._app.end_drag()
+
+    def win_resize_begin(self, direction: str, *_):
+        return self._app.begin_resize(direction)
+
+    def win_resize_to(self, dx: float, dy: float, *_):
+        return self._app.resize_to(dx, dy)
+
+    def win_resize_end(self, *_):
+        return self._app.end_resize()
 
     def win_minimize(self, *_):
         self._app.minimize_main()
@@ -741,6 +751,9 @@ class App:
         self._main_hwnd = 0        # 主窗口句柄缓存
         self.maxed = False         # 自绘最大化状态（无边框窗口不能靠 IsZoomed 判断）
         self._restore_rect = None  # 最大化前的窗口矩形
+        self._drag_origin = None   # 拖动起点（窗口左上角）
+        self._resize_state = None  # 缩放起点（初始矩形 + 方向）
+        self.min_size = (900, 600) # 和 create_window 的 min_size 保持一致
 
     # ---- 主窗口的窗口操作（无边框，全部走 Win32）----
     def main_hwnd(self) -> int:
@@ -751,39 +764,117 @@ class App:
         self._main_hwnd = hits[0] if hits else 0
         return self._main_hwnd
 
-    def begin_drag(self) -> None:
-        """把这次按下交给系统的"拖动标题栏"处理。
+    def begin_drag(self) -> bool:
+        """拖动开始：记住窗口当前位置，后面按 JS 报上来的位移算新位置。
 
-        必须用 PostMessage 而不是 SendMessage：js_api 是在 UI 线程上执行的，
-        SendMessage 会同步等移动循环结束，直接把界面卡死。
+        为什么不用「WM_NCLBUTTONDOWN + HTCAPTION 交给系统移动循环」：
+        那条路在 WebView2 上走不通。鼠标按下的瞬间 WebView2 会把鼠标捕获
+        抢到自己那个子窗口（Chrome_WidgetWin_1）上，随后 DefWindowProc 的
+        移动循环虽然能 SetCapture 回顶层窗口，但实际跑起来收不到 mousemove，
+        窗口一动不动 —— 实测就是这样，不是理论问题。
+
+        pywebview 自己的 easy_drag 也是这条路（JS 算位移 → SetWindowPos），
+        所以这里跟它保持一致。代价是没有 Aero Snap，换来的是"一定能拖"。
         """
         hwnd = self.main_hwnd()
         if not hwnd:
             log("begin_drag: 找不到主窗口句柄")
-            return
+            return False
         try:
             if self.maxed:
                 self._unmaximize(hwnd, follow_cursor=True)
-            user32.ReleaseCapture()
-            user32.PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            self._drag_origin = (rect.left, rect.top)
+            log(f"拖动开始 hwnd={hwnd} 起点=({rect.left},{rect.top})")
+            return True
+        except Exception as e:
+            log(f"拖动初始化失败：{e}")
+            return False
+
+    def drag_to(self, dx: float, dy: float) -> bool:
+        hwnd = self.main_hwnd()
+        origin = self._drag_origin
+        if not hwnd or not origin:
+            log(f"drag_to 忽略 hwnd={hwnd} origin={origin}")
+            return False
+        try:
+            user32.SetWindowPos(
+                hwnd, 0,
+                origin[0] + int(dx), origin[1] + int(dy),
+                0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            return True
         except Exception as e:
             log(f"拖动失败：{e}")
+            return False
 
-    def begin_resize(self, direction: str) -> None:
+    def end_drag(self) -> bool:
+        self._drag_origin = None
+        return True
+
+    def begin_resize(self, direction: str) -> bool:
+        """缩放开始：记下初始矩形和方向，后面按位移改四条边。"""
         hwnd = self.main_hwnd()
-        if not hwnd:
-            return
-        if self.maxed:  # 最大化状态下不许拉边
-            return
-        code = HT_DIRS.get((direction or "").strip().lower())
-        if code is None:
+        if not hwnd or self.maxed:  # 最大化状态下不许拉边
+            return False
+        d = (direction or "").strip().lower()
+        if d not in HT_DIRS:
             log(f"未知的缩放方向：{direction}")
-            return
+            return False
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        self._resize_state = {
+            "dir": d,
+            "rect": (rect.left, rect.top, rect.right, rect.bottom),
+        }
+        return True
+
+    def resize_to(self, dx: float, dy: float) -> bool:
+        hwnd = self.main_hwnd()
+        st = self._resize_state
+        if not hwnd or not st:
+            return False
+        left, top, right, bottom = st["rect"]
+        d = st["dir"]
+        dx, dy = int(dx), int(dy)
+        if "w" in d:
+            left += dx
+        if "e" in d:
+            right += dx
+        if "n" in d:
+            top += dy
+        if "s" in d:
+            bottom += dy
+
+        # 最小尺寸得自己守：FormBorderStyle.None 之后 WinForms 的 MinimumSize
+        # 只在系统拖边循环里生效，SetWindowPos 是绕过它的。
+        min_w, min_h = self.min_size
+        if right - left < min_w:
+            if "w" in d:
+                left = right - min_w
+            else:
+                right = left + min_w
+        if bottom - top < min_h:
+            if "n" in d:
+                top = bottom - min_h
+            else:
+                bottom = top + min_h
+
         try:
-            user32.ReleaseCapture()
-            user32.PostMessageW(hwnd, WM_NCLBUTTONDOWN, code, 0)
+            user32.SetWindowPos(
+                hwnd, 0, left, top, right - left, bottom - top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            return True
         except Exception as e:
             log(f"缩放失败：{e}")
+            return False
+
+    def end_resize(self) -> bool:
+        self._resize_state = None
+        return True
 
     def minimize_main(self) -> None:
         hwnd = self.main_hwnd()
