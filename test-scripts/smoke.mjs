@@ -1,8 +1,12 @@
 // test-scripts/smoke.mjs —— 三种 shell 的冒烟测试
 // 用法：先启动 hub，再 node test-scripts/smoke.mjs
 
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const BASE = 'http://127.0.0.1:7717';
-const ROOT = 'D:/work/Project/Zen-Dock/test-scripts';
+// 从本文件位置推导，换机器/换盘符都不用改
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 async function api(path, opts = {}) {
   const r = await fetch(BASE + path, {
@@ -30,7 +34,7 @@ for (const c of cases) {
       kind: 'script',
       name: c.name,
       shell: c.shell,
-      path: `${ROOT}/${c.file}`,
+      path: path.join(ROOT, c.file),
       cwd: ROOT,
     }),
   });

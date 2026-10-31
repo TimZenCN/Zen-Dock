@@ -2,5 +2,8 @@
 pywebview>=6.0
 pystray>=0.19
 
-# 仅 shell/make_icon.py 需要，改图标时用
+# ring.py 每帧要做一次预乘 alpha 转换（400×400 = 16 万像素），纯 Python 循环太慢
+numpy>=1.24
+
+# 仅 shell/make_icon.py 和 test-scripts 里的截图/验证脚本需要
 pillow>=10.0

@@ -83,7 +83,7 @@ pythonw shell/desktop.py --hidden
 
 - 鼠标就是圆心，所有项到鼠标距离完全相同，靠方位记忆比靠视觉搜索快
 - **12 点固定是「主页」**，点它打开主窗口；其余七个方位放快捷项
-- 每块扇形带图标和名字，状态靠描边颜色区分（绿=运行中、黄=过渡、红=失败）
+- 每块扇形带图标和名字，状态靠填充色和文字颜色区分（绿字=运行中、暗红=失败、灰=过渡中）
 - 整块点一下就启动；**右键**扇形 = 关坞 + 主窗口展开那张卡的详情
 - 唤出时八块从圆心扩散，按方位错峰 25ms
 - 快捷项在设置里勾选，**最多 7 个**（8 个方位减掉主页那个）
@@ -98,58 +98,39 @@ pythonw shell/desktop.py --hidden
 
 热键是系统级注册（`RegisterHotKey`），不是键盘钩子——所以能真做冲突检测：注册失败就说明被别的程序占了，设置页会直接告诉你。改热键时如果新的注册不上，会自动把旧的恢复回来，不会让你失去唤出能力。
 
-#### 圆环是怎么做到"悬浮"的
+#### 圆环是怎么做到真透明的
 
-窗口是 400×400 的透明无边框窗口，再用 `SetWindowRgn` 把它的**命中区域裁成八块扇形的并集**（`CreatePolygonRgn` 逐块建 + `CombineRgn(RGN_OR)` 合并，半径外扩 1.5px、角度外扩 0.4° 给硬裁剪边缘留抗锯齿余量）。
+圆环坞**不用 WebView2**，是 `shell/ring.py` 里一个纯 Win32 分层窗口 + GDI+ 自绘。
 
-区域外的像素既不被绘制也不接收鼠标，点击直接穿透到桌面——这是关键：没有它，鼠标下面会有一块看不见的矩形挡住一切，而且窗口永远不失焦，失焦自动关闭也就失效了。
+窗口是 `WS_EX_LAYERED`，每帧把一张 400×400 的 **32bpp 预乘 ARGB** 位图交给 `UpdateLayeredWindow`。每个像素自带 alpha，这是 Windows 原生的 per-pixel alpha：
 
-**为什么不是裁成一个完整的环**：环会把扇区之间的 5° 间隙也包进窗口区域，那些间隙没有任何东西覆盖，露出的是窗体底色。裁成扇形并集后间隙一起被剔除，真正透明。
+- 扇形边缘由 GDI+ 抗锯齿生成，过渡带真的半透明，透出的是桌面
+- 扇区之间那 5° 的间隙真的透出壁纸，不是拿深色填的
+- 环心那个洞、窗口四角，全是真的空的
 
-副作用：**点扇区之间的间隙会穿透到桌面，等于关掉坞**。这符合"点空白处关闭"的直觉。
+命中仍然用 `SetWindowRgn`，但职责变了：**只管鼠标，不管绘制**。区域外的点击照样穿透到桌面，环内的绘制完全由 alpha 决定，两者互不干扰。区域外扩 1.5px 是为了让抗锯齿带也能点中。
 
-#### 边缘为什么会有一圈"白边"（踩了四轮的坑）
+副作用（和以前一样）：点扇区之间的间隙会穿透到桌面，等于关掉坞。这符合"点空白处关闭"的直觉。
 
-**`transparent=True` 不等于窗口透明。** pywebview 在这个分支里只做了一件事：`browser.DefaultBackgroundColor = Transparent`。Form 的 `BackColor` 从头到尾没被改过，一直是 `SystemColors.Control`，也就是 `#F0F0F0`。
+#### 为什么把 WebView2 换掉了
 
-WebView2 官方文档写得很清楚：`DefaultBackgroundColor` **只接受 alpha=0 或 255**（传半透明直接 `E_INVALIDARG`），而 alpha=0 时它**把宿主窗口自己的像素当作背景来渲染**。也就是说：
+上一版是 pywebview 的透明窗口 + `SetWindowRgn` 硬裁剪，怎么调都有一圈边、也做不出半透明。三条硬约束决定了那套栈**在原理上**做不到：
 
-> SVG 的抗锯齿像素混的是 `Form.BackColor`，不是桌面。
+1. **`DefaultBackgroundColor` 只接受 alpha 0 或 255**。传半透明直接 `E_INVALIDARG`；传 0 时它**把宿主窗口自己的像素当背景来渲染** —— 页面里写 `background: transparent`，混出来的是 `Form.BackColor`，不是桌面。
+2. **`SetWindowRgn` 是 1-bit 掩码**。形状内 100% 不透明、形状外 100% 透明，中间没有过渡。边缘只能是硬阶梯。
+3. 上两条合起来：形状内部的洞、半透明卡片、平滑边缘，一个都做不出来。
 
-所以抗锯齿带永远是「扇形色 over `#F0F0F0`」，跨任何桌面背景都不变 —— 这就是那条"奇怪的底边"，也是为什么**换桌面背景色、换 `background_color` 参数都没用**。
+还有个更烦的问题：那套栈的唤出是**串行**的 —— 先创建窗口显示成矩形（几百 ms），再在后台线程轮询找到 hwnd 设区域，最后才等页面 `fetch` 完两个接口渲染 UI。于是看到的是三层贴纸依次贴上：**矩形 → 空环 → UI**。
 
-**怎么验证的**（这个顺序很重要，我前面几轮都栽在验证方法上）：
+现在的顺序反过来了：**先在内存里把整帧画完，再 `ShowWindow`**。屏幕上出现的第一帧就是动画第 0 帧，没有矩形、没有空环，也没有 WebView2 那几百毫秒的冷启动。
 
-1. **先看边缘颜色是否随背景变**。垫白/黑/红/灰四种纯色底，扫描同一点：
-   ```
-   内弧 r=65   #f0f0f0  #f0f0f0  #f0f0f0  #f0f0f0   固定 → 是绘制内容
-   外弧 r=186  #ffffff  #000000  #ff0000  #808080   随背景 → 是真透明
-   ```
-   **固定不变 = 画上去的东西，不是 alpha 问题。** 这一条直接否掉了"抗锯齿/透明合成"的所有猜想。
-
-2. **把活动区域临时改成整窗 400×400**，四角、扇区间隙、圆心立刻全变 `#F0F0F0` —— 证明页面透明处下面垫着一块不透明底色。
-
-3. 差分法（唤出前后截屏相减）只能证明**区域外**不绘制，测不到"区域内、SVG 未覆盖"的像素。我一开始只用差分，得出的"窗口透明"结论是错的。
-
-**修法**：把宿主底色设成和扇形 fill 完全一样的颜色。
-
-```python
-win.native.BackColor = Color.FromArgb(22, 27, 38)   # #161b26 = 扇形 fill
-```
-
-抗锯齿于是变成「扇形色 over 扇形色」，过渡带自然消失。实测四种背景下边缘都只剩两个值：`#161b26`（扇形）和背景色，中间没有 `#f0f0f0`。
-
-**这条路的极限是硬边。** `SetWindowRgn` 是 1-bit 裁剪，没有抗锯齿；`LWA_COLORKEY` 只能抠精确颜色，抗锯齿像素不等于键控色，抠不掉。想要真正的 per-pixel alpha 抗锯齿边缘，得换 Electron（Chromium 原生透明）或者上 DirectComposition 重写宿主 —— 两条都不划算。
-
-所以现在边缘是锐利的硬切。为了不让它显成多边形，`_sector_polygon` 的弧段离散到 60 段（r=184 处每段 2px），圆角 7 段。
-
-诊断脚本：`test-scripts/probe_white.py`（纯色底复现）、`probe_region.py`（`PtInRegion` 量区域）、`probe_diff.py`（差分）、`diag_edge.py`（四背景对比）。
+窗口还是常驻复用的（hide 不销毁），所以从第二次起唤出只要 **20~50ms**：拉一次 `/api/state`、重算区域、画一帧、显示。`clr.AddReference("System.Drawing")` 那 800ms 的首次冷加载由启动时的后台线程预热掉。
 
 #### 退出动画
 
-关坞不是直接销毁窗口，而是先把八块扇形收缩回圆心（190ms，`scale(.3)` + 淡出），播完才真正销毁。点主页、右键看详情、Esc、点扇形启动成功——所有关闭路径都走这个动画。
+关坞不是直接销毁窗口，而是先把八块扇形收缩回圆心（190ms），播完再隐藏。点主页、右键看详情、Esc、点扇形启动成功、失焦——所有关闭路径都走这个动画。
 
-失焦自动关闭没有动画（那条路径在 Python 侧，从子线程调 `evaluate_js` 会撞上 WebView2 的 COM 线程限制）。视线已经移开的时候也不差这 190ms。
+失焦关闭现在走 `WM_ACTIVATE` 的 `WA_INACTIVE`，和主动关闭是同一条路径，所以也有动画。入场完成后才开始监控（`_ready`），否则窗口刚创建还没激活时会被自己判成失焦。
 
 ## 命令行（zd）
 
@@ -195,7 +176,7 @@ ID（字母数字下划线连字符）: relay
 名称 [relay]: Provider Relay
 启动命令（如 node / python / npm）: node
 参数，空格分隔（可留空）: index.mjs
-工作目录（可留空 = 项目根）: D:/work/.../provider-relay
+工作目录（可留空 = 项目根）: D:/work/provider-relay
 监听端口（可留空 = 不做端口探活）: 8787
 ```
 
@@ -254,6 +235,7 @@ zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
 | 项 | 说明 |
 |---|---|
 | 坞形态 | 圆环 / 面板 |
+| 动画时长 | 圆环展开的时间，100~800ms，默认 340。收起和逐块错峰按同比例联动 |
 | 唤出快捷键 | 全局热键，默认 `alt+x`。点「应用」当场注册，失败会报冲突 |
 | 坞内快捷项 | 勾选哪 7 个进圆环，顺序就是方位顺序（12 点之后顺时针）。上下箭头调整 |
 
@@ -265,7 +247,14 @@ zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
 
 **关于**
 
-版本、Node / WebView2 / pywebview 版本、进程号、已运行时长、项目与配置路径（点击打开所在文件夹）、快捷键速查。
+头部是项目名、版本和一句话描述，下面依次是作者、版本检查、许可证、环境、路径、快捷键。
+
+- **作者 / 仓库 / 许可证**都从 `package.json` 读（`author` / `repository` / `license`），代码里不写死。`repository` 为空时相关按钮自动置灰。
+- **版本检查**走服务端请求 GitHub 的 `releases/latest`，和 `package.json` 的 `version` 比。结果缓存 10 分钟 —— 未认证的 GitHub API 只有 60 次/小时，反复点按钮会把配额打光。查不到 Release、被限流、没网，一律降级成「手动去看看」，不弹红字。
+- **跳转外链**只走 `/api/open-external`，前端只能传 `kind`（`author` / `repo` / `releases` / `license`），真实地址由服务端从 `package.json` 拼出来。这个端点没有接收任意 URL 的能力。
+- 环境部分：Node / WebView2 / pywebview 版本、进程号、已运行时长。路径点击打开所在文件夹。
+
+协议是 **MIT**，全文见仓库根的 `LICENSE`。
 
 「打开页面」走的是服务端 `spawn` 而不是前端 `window.open`——只有这样才能真正控制窗口形态（`--new-window` / `--app`），在 WebView2 里也不会被拦。
 
@@ -312,7 +301,7 @@ zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
   "kind": "service",
   "name": "DSH Web",
   "cmd": "node",
-  "args": ["D:/.../@deepseek-ai/dsh/lib/bin.js", "web", "--no-open"],
+  "args": ["D:/tools/node_modules/@deepseek-ai/dsh/lib/bin.js", "web", "--no-open"],
   "cwd": "D:/work",
   "port": 3080,
   "url": "http://127.0.0.1:3080/",
@@ -407,7 +396,8 @@ hub 重启后，之前跑着的服务不会丢：
 - **`zd` 的 Ctrl+C 只在真终端里可靠。** Windows 没有 POSIX 信号，Node 的 `SIGINT` 靠控制台事件模拟。在 Windows Terminal / PowerShell / cmd 里按 Ctrl+C 正常；从 Git Bash 用 `kill -INT` 或 `timeout -s INT` 打过去可能到不了。真按不动就再按一次，第二次会强制退出。
 - **`--port` 是 item 的端口，hub 端口是 `--hub-port`。** 两个不能共用一个名字，否则 `zd edit x --port 8888` 会被当成去连 8888 上的 hub。
 - **`zd add` 的向导在管道输入下可能提前结束。** 把答案 `echo` 进去时，输入读完就 EOF，后面的问题拿不到值。手动在终端里跑没有这个问题。
-- **圆环里放不下太长的名字。** 扇区在 11px 字号下大约 79px 宽，超出按实测宽度截断加省略号。中英文混排的长名字（比如 `Provider Relay`）会被截。想让它短一点，给 item 加 `shortName`。
+- **圆环的 UI 是 GDI+ 画的，不是 HTML。** 改圆环的配色和几何要改 `shell/ring.py`（`SECTOR`、`R_OUT`、`R_IN` 这些常量），改管理页和面板坞才是改 `lib/panel.js`。文字用 `DrawString` 渲染，和浏览器的字重、字距有细微差别。
+- **圆环里放不下太长的名字。** 名字有两道限制：先按字数（中文算 2 个单位、其他算 1，上限 10 单位 = **5 个汉字**），再按像素兜底（13px 粗体下弧长大约 85px）。超了截断加省略号。中英文混排的长名字（比如 `Provider Relay`）会被截。想让它短一点，给 item 加 `shortName`。
 - **圆环贴屏幕边缘时会被切掉一部分。** 窗口按鼠标居中、不做 clamp（clamp 了圆心就跟鼠标错开），所以鼠标贴边时圆环会有一部分在屏幕外。这是有意的取舍。
 - **用 `Start-Process` 开新窗口的脚本，hub 显示「完成」而不是「运行中」。** 这类脚本（比如 `Run/` 下那几个 Flutter 启动器）自己立刻退出，真正的进程在 hub 之外——hub 看不到它的日志，也停不掉它。这是脚本本来的设计，不是 bug。如果希望 hub 能管，得让脚本直接跑命令而不是 `Start-Process`，代价是失去那个独立窗口（`flutter run` 的 `r`/`q` 热重载按键需要真终端）。
 
@@ -415,6 +405,7 @@ hub 重启后，之前跑着的服务不会丢：
 
 ```
 index.mjs                    入口
+LICENSE                      MIT 协议全文
 zen-dock.ps1                 浏览器启动（PowerShell）
 zen-dock-window.bat          桌面窗口启动
 zd.cmd / zd                  CLI 包装（ASCII-only，cmd.exe 按 OEM 代码页读文件）
@@ -432,18 +423,18 @@ lib/
   logs.js                    环形缓冲 + GBK 回退解码
   sites.js                   静态托管 + <base> 注入
   system.js                  开浏览器窗口 / 开资源管理器 / 开机自启注册表
-  panel.js                   管理页 + 圆环坞 + 面板坞（内联 CSS/JS）
-  system.js                  开浏览器窗口 / 开资源管理器 / 开机自启注册表 / 关于信息
+  panel.js                   管理页 + 面板坞（内联 CSS/JS）
   cli/
     client.js                hub 探测 + HTTP + SSE 消费
     format.js                表格（CJK 宽度感知）/ 着色 / JSON
     commands.js              14 个命令的实现
 shell/
-  desktop.py                 桌面窗口外壳（pywebview + WebView2 + pystray 托盘 + 拓展坞）
+  desktop.py                 桌面窗口外壳（pywebview + WebView2 + pystray 托盘 + 面板坞）
+  ring.py                    圆环坞：分层窗口 + GDI+ 自绘（真 per-pixel alpha）
   hotkey.py                  全局热键（RegisterHotKey + 消息循环）
   setup.bat                  首次建 .venv
   make_icon.py               生成 shell/icon.ico
-  requirements.txt           外壳依赖（pywebview / pystray / pillow）
+  requirements.txt           外壳依赖（pywebview / pystray / pillow / numpy）
 sites/<id>/                  静态页面
 test-scripts/                冒烟测试
 ```
@@ -459,13 +450,21 @@ node test-scripts/smoke.mjs
 
 跑三种 shell 各一次，验证中文不乱码、退出码正确。
 
-**圆环坞的端到端验收**（需要 `.venv` 和桌面外壳在跑）：
+**圆环坞的三层验证**（不需要外壳在跑，脚本自己开窗口）：
 
 ```bash
-.venv/Scripts/python.exe test-scripts/probe_ring_e2e.py
+.venv/Scripts/python.exe test-scripts/probe_ring_draw.py         # ① 位图 alpha
+.venv/Scripts/python.exe test-scripts/probe_ring_window.py       # ② Win32 链路
+.venv/Scripts/python.exe test-scripts/probe_ring_transparent.py  # ③ 屏幕合成
 ```
 
-模拟 Alt+X → 检查窗口尺寸和圆心对齐 → 点扇形启动服务 → 右键开详情 → 点主页 → 切走焦点验证自动关闭，共 10 项。
+① 不开窗口，把圆环画进一张 PNG，逐点验三件事：扇形内部 alpha=255、扇区间隙 alpha=0、外缘存在 0<alpha<255 的过渡带。
+
+② 窗口全程隐藏，验 `WS_EX_LAYERED` 设上了、`GetWindowRgn` 返回 COMPLEXREGION、圆心对准鼠标、复用唤出耗时、销毁后句柄清干净。
+
+③ 真开窗口（固定在屏幕左上角，不跟鼠标），截屏后按**颜色是否等于扇形色 `#161b26`** 判定：环心、四角、八个间隙都不该等于扇色（等于就说明铺了底），扇形内部必须等于。
+
+为什么不用「唤出前后截图相减」：人在用电脑，背后内容随时在变，像素不同既可能是窗口画的，也可能只是背景刷新了。也别用「颜色方差」—— 背后的窗口可能正好是纯色。**只有「是否等于扇色」这条判据不受背景影响。**
 
 **界面截图**（不用开窗口，Chrome headless 渲染）：
 

@@ -1,7 +1,7 @@
 ﻿# zen-dock.ps1 - start the Zen-Dock local panel
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File "D:\work\Project\Zen-Dock\zen-dock.ps1"
+#   powershell -ExecutionPolicy Bypass -File ".\zen-dock.ps1"
 #   ... -Restart          stop the old instance on the same port first
 #   ... -NoOpen           do not open the browser
 #   ... --port 7718       extra args are passed through to node index.mjs

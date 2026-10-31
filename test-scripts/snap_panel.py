@@ -63,6 +63,11 @@ SETTINGS = {
 
 ABOUT = {
     "version": "0.1.0",
+    "description": "零依赖的本地服务面板：托管静态页面、看护常驻服务、跑一次性脚本，全在一个窗口里。",
+    "author": "TimZenCN",
+    "authorUrl": "https://github.com/TimZenCN",
+    "repoUrl": "https://github.com/TimZenCN/Zen-Dock",
+    "license": "MIT",
     "node": "v22.22.2",
     "pid": 10480,
     "uptime": 3725,

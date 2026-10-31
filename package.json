@@ -2,7 +2,17 @@
   "name": "zen-dock",
   "version": "0.1.0",
   "private": true,
-  "description": "A zero-dependency local service panel: host static pages, supervise long-running services, run one-shot scripts, all from one browser tab.",
+  "description": "零依赖的本地服务面板：托管静态页面、看护常驻服务、跑一次性脚本，全在一个窗口里。",
+  "license": "MIT",
+  "author": {
+    "name": "TimZenCN",
+    "url": "https://github.com/TimZenCN"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TimZenCN/Zen-Dock.git"
+  },
+  "homepage": "https://github.com/TimZenCN/Zen-Dock#readme",
   "type": "module",
   "bin": {
     "zen-dock": "./index.mjs",

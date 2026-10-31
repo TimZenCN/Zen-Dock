@@ -48,10 +48,8 @@ IS_WIN = os.name == "nt"
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WIN else 0
 
 DOCK_W, DOCK_H = 560, 430      # 面板形态
-RING_W, RING_H = 400, 400      # 圆环形态，正方形
-# 圆环几何，必须和 panel.js 里的 R_OUT / R_IN / RC / MAX_HALF 一致
-RING_R_OUT, RING_R_IN, RING_RC = 184, 66, 10
-RING_MAX_HALF = 34
+# 圆环形态的窗口、几何、配色全部在 ring.py 里 —— 它自己开分层窗口自绘，
+# 不走 pywebview。这里不再保留 RING_* 常量，免得两份几何各改一半。
 MAIN_TITLE = "Zen-Dock"
 DOCK_TITLE = "Zen-Dock 快速启动"
 SW_RESTORE = 9
@@ -187,22 +185,6 @@ def read_settings() -> dict:
     except Exception as e:
         log(f"读配置失败，按默认处理：{e}")
         return {}
-
-
-def dock_slot_count() -> int:
-    """圆环上一共几块：主页 + 坞内快捷项（上限 7）。
-
-    跟 panel.js 的 computeSlots 保持一致的算法，否则区域和实际画的扇区对不上。
-    """
-    try:
-        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
-    except Exception:
-        return 8
-    picked = (cfg.get("settings") or {}).get("dockItems")
-    if picked is None:
-        items = cfg.get("items") or []
-        picked = [i.get("id") for i in items if i.get("enabled", True)][:7]
-    return 1 + min(len([x for x in picked if x]), 7)
 
 
 def save_setting(key: str, value) -> None:
@@ -428,130 +410,10 @@ class MONITORINFO(ctypes.Structure):
     ]
 
 
-def cursor_center(w: int, h: int) -> tuple[int, int]:
-    """窗口左上角，让鼠标落在窗口正中心。
-
-    故意不做贴边 clamp：一旦把窗口往里推，圆心就跟鼠标错开了，
-    圆环就不是"围绕鼠标"了。贴边时宁可让窗口超出屏幕。
-    """
-    pt = wintypes.POINT()
-    user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x - w // 2, pt.y - h // 2
-
-
 RGN_DIFF = 4
 SWP_NOSIZE = 0x0001
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
-
-
-RGN_OR = 2
-WINDING = 2
-
-
-def _quad_points(p0, ctrl, p1, n):
-    """二次贝塞尔离散成点，用来画圆角。"""
-    out = []
-    for i in range(1, n + 1):
-        t = i / n
-        u = 1 - t
-        out.append(
-            (
-                u * u * p0[0] + 2 * u * t * ctrl[0] + t * t * p1[0],
-                u * u * p0[1] + 2 * u * t * ctrl[1] + t * t * p1[1],
-            )
-        )
-    return out
-
-
-def _sector_polygon(cx, cy, R, r, rc, a1, a2, steps=60):
-    """圆角扇形的多边形顶点。
-
-    跟 panel.js 里 sectorPath 用同一套算法（外弧 → 外角圆角 → 径向边 →
-    内角圆角 → 内弧 → 内角圆角 → 径向边 → 外角圆角），只是这里离散成点，
-    好喂给 CreatePolygonRgn。
-    """
-    import math
-
-    dout = math.degrees(rc / R)
-    din = math.degrees(rc / r)
-
-    def pt(rad, deg):
-        a = math.radians(deg)
-        return (cx + rad * math.sin(a), cy - rad * math.cos(a))
-
-    pts = []
-    for i in range(steps + 1):
-        deg = (a1 + dout) + ((a2 - dout) - (a1 + dout)) * i / steps
-        pts.append(pt(R, deg))
-    pts += _quad_points(pt(R, a2 - dout), pt(R, a2), pt(R - rc, a2), 7)
-    pts.append(pt(r + rc, a2))
-    pts += _quad_points(pt(r + rc, a2), pt(r, a2), pt(r, a2 - din), 7)
-    for i in range(steps + 1):
-        deg = (a2 - din) - ((a2 - din) - (a1 + din)) * i / steps
-        pts.append(pt(r, deg))
-    pts += _quad_points(pt(r, a1 + din), pt(r, a1), pt(r + rc, a1), 7)
-    pts.append(pt(R - rc, a1))
-    pts += _quad_points(pt(R - rc, a1), pt(R, a1), pt(R, a1 + dout), 7)
-    return pts
-
-
-def _polygon_rgn(pts):
-    n = len(pts)
-    arr = (wintypes.POINT * n)()
-    for i, (x, y) in enumerate(pts):
-        arr[i] = wintypes.POINT(int(round(x)), int(round(y)))
-    return gdi32.CreatePolygonRgn(arr, n, WINDING)
-
-
-def set_sectors_region(hwnd: int, w: int, h: int, count: int,
-                       r_out: float, r_in: float, rc: float,
-                       max_half: float) -> bool:
-    """把命中区域裁成 N 块扇形的并集。
-
-    为什么不是环形：环形会把扇区之间的间隙也包进窗口区域，那些间隙没有
-    任何东西覆盖，露出的就是 WinForms 窗体的默认背景色（#F0F0F0）——也就是
-    肉眼看到的"白边"。改成扇形并集后，间隙和环外一起被剔除，真正透明。
-
-    区域要**外扩** 1.5px，把 SVG 的抗锯齿像素完整包进来。
-
-    这里的原理是：窗口背景本来就是透明的（WebView2 的 DComp 视觉树直出，
-    Form 的 BackColor 根本不参与合成），所以区域内、扇形之外多出来的那
-    1.5px 会正常透出桌面，不会露任何底色。
-
-    反过来，如果内缩，就会把抗锯齿带一刀切掉 —— 边缘变成硬阶梯，
-    每一级都露着背景色，在浅色桌面上看起来就是一圈毛边。
-
-    外扩的前提是区域为"扇形并集"而不是"完整环形"：环形会把扇区之间的
-    间隙也包进去，那些间隙没有内容覆盖，才会露出窗体底色。
-    """
-    cx, cy = w // 2, h // 2
-    step = 360.0 / max(1, count)
-    half = min(step / 2 - 2.5, max_half)
-    R = r_out + 1.5
-    r = max(2.0, r_in - 1.5)
-
-    total = None
-    try:
-        for i in range(count):
-            mid = i * step
-            pts = _sector_polygon(cx, cy, R, r, rc, mid - half, mid + half)
-            rgn = _polygon_rgn(pts)
-            if not rgn:
-                continue
-            if total is None:
-                total = rgn
-            else:
-                gdi32.CombineRgn(total, total, rgn, RGN_OR)
-                gdi32.DeleteObject(rgn)
-        if total is None:
-            log("扇形区域创建失败")
-            return False
-        user32.SetWindowRgn(hwnd, total, True)
-        return True
-    except Exception as e:
-        log(f"设置扇形区域出错：{e}")
-        return False
 
 
 def cursor_anchor(w: int, h: int) -> tuple[int, int]:
@@ -742,7 +604,8 @@ class App:
         self.port = port
         self.host = host
         self.main = None
-        self.dock = None
+        self.dock = None      # 面板形态的 pywebview 窗口
+        self.ring = None      # 圆环形态的分层窗口（shell/ring.py）
         self.tray = Tray()
         self.hotkey = HotkeyListener()
         self.hotkey_want = read_settings().get("hotkey") or "alt+x"
@@ -996,7 +859,9 @@ class App:
     def toggle_dock(self) -> None:
         log("热键触发 toggle_dock")
         try:
-            if self.dock is not None:
+            if self.ring is not None and self.ring.is_open:
+                self.ring.close()
+            elif self.dock is not None:
                 self.close_dock()
             else:
                 self.open_dock()
@@ -1004,6 +869,12 @@ class App:
             log(f"切换拓展坞失败：{type(e).__name__}: {e}")
 
     def open_dock(self) -> None:
+        # 圆环形态走分层窗口自绘：真 per-pixel alpha，第一帧就是完整 UI。
+        # 面板形态还是 pywebview —— 它是规规矩矩的矩形窗口，不需要透明。
+        if (read_settings().get("dockMode") or "ring") == "ring":
+            self._open_ring()
+            return
+
         if self.dock is not None:
             try:
                 self.dock.show()
@@ -1013,20 +884,8 @@ class App:
             return
         import webview
 
-        # 形态每次现读配置，设置页改完下次唤出就生效
-        ring = (read_settings().get("dockMode") or "ring") == "ring"
-        if ring:
-            w, h = RING_W, RING_H
-            x, y = cursor_center(w, h)
-            extra = dict(
-                transparent=True,
-                shadow=False,
-                background_color="#000000",
-            )
-        else:
-            w, h = DOCK_W, DOCK_H
-            x, y = cursor_anchor(w, h)
-            extra = dict(background_color="#0b0e14")
+        w, h = DOCK_W, DOCK_H
+        x, y = cursor_anchor(w, h)
 
         try:
             win = webview.create_window(
@@ -1041,7 +900,7 @@ class App:
                 on_top=True,
                 resizable=False,
                 js_api=self.api,
-                **extra,
+                background_color="#0b0e14",
             )
         except Exception as e:
             log(f"打开拓展坞失败：{e}")
@@ -1050,10 +909,56 @@ class App:
 
         self.dock = win
         win.events.closed += self._on_dock_closed
-        log(f"拓展坞已打开 ({x},{y}) 形态={'圆环' if ring else '面板'}")
-        if ring:
-            threading.Thread(target=self._apply_ring_region, args=(win,), daemon=True).start()
+        log(f"拓展坞已打开 ({x},{y}) 形态=面板")
         threading.Thread(target=self._watch_dock_focus, args=(win,), daemon=True).start()
+
+    # ---- 圆环坞 ----
+
+    def _open_ring(self) -> None:
+        try:
+            from ring import RingDock
+        except Exception as e:
+            log(f"加载圆环坞失败，退回面板形态：{type(e).__name__}: {e}")
+            self._open_panel_fallback()
+            return
+
+        if self.ring is None:
+            self.ring = RingDock(
+                port=self.port,
+                on_home=self._dock_home,
+                on_logs=self._dock_logs,
+                on_closed=self._dock_ring_closed,
+            )
+        self.ring.show()
+
+    def _open_panel_fallback(self) -> None:
+        """圆环坞起不来时的兜底：临时把形态当面板处理。"""
+        saved = read_settings().get("dockMode")
+        save_setting("dockMode", "panel")
+        try:
+            self.open_dock()
+        finally:
+            save_setting("dockMode", saved or "ring")
+
+    def _dock_home(self) -> None:
+        """圆环 12 点那块「主页」：关坞之后把主窗口叫出来。
+
+        这个回调跑在圆环窗口自己的线程里，而 pywebview 的窗口操作属于主线程，
+        所以丢到短命线程里做，别阻塞消息循环。
+        """
+        log("坞 → 主窗口")
+        threading.Thread(target=self.show_main, daemon=True).start()
+
+    def _dock_logs(self, item_id: str) -> None:
+        def work():
+            self.show_main()
+            time.sleep(0.25)  # 等主窗口真的露出来再切抽屉
+            self.call_main_js("openDrawer", item_id)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _dock_ring_closed(self) -> None:
+        log("圆环坞已关闭")
 
     def _paint_form_backdrop(self, win, rgb=(22, 27, 38)) -> None:
         """把 WinForms 窗体底色设成页面底色。
@@ -1070,8 +975,10 @@ class App:
         那 1.5px）露出来的都是浅灰，跨任何桌面背景都不变 —— 这就是那条
         "奇怪的底边"，也是为什么换背景色没用。
 
-        圆环坞传 #161b26（= 扇形 fill），主窗口传 #0b0e14（= --bg）。
-        底色和页面底色差 0，边缘过渡带自然消失。
+        主窗口传 #0b0e14（= --bg）。底色和页面底色差 0，边缘过渡带自然消失。
+
+        圆环坞不需要这一步 —— 它走的是 shell/ring.py 的分层窗口，alpha 由
+        位图逐像素决定，压根没有"窗体底色"这回事。
         """
         try:
             import clr  # pythonnet，pywebview 启动时已加载
@@ -1083,54 +990,13 @@ class App:
         except Exception as e:
             log(f"设置窗体底色失败（不影响使用）：{type(e).__name__}: {e}")
 
-    def _apply_ring_region(self, win) -> None:
-        """等窗口真正创建出来，再把它裁成环形。
-
-        半径按窗口实际尺寸换算：无边框窗口的最终大小不一定等于请求值
-        （实测请求 400x400 拿到过 384x361），SVG 那边用 preserveAspectRatio
-        居中缩放，所以按 min(w,h)/400 折算才对得上。
-        """
-        self._paint_form_backdrop(win)
-
-        hwnd = 0
-        for _ in range(40):
-            time.sleep(0.05)
-            hits = find_windows(DOCK_TITLE)
-            if hits:
-                hwnd = hits[0]
-                break
-        if not hwnd:
-            log("没找到坞窗口，跳过环形区域（点击环外不会穿透）")
-            return
-
-        rect = wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        w, h = rect.right - rect.left, rect.bottom - rect.top
-
-        # 先试着把尺寸掰回正方形，掰不动就用实际尺寸折算
-        if (w, h) != (RING_W, RING_H):
-            user32.SetWindowPos(
-                hwnd, 0, rect.left, rect.top, RING_W, RING_H,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            )
-            time.sleep(0.06)
-            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            w, h = rect.right - rect.left, rect.bottom - rect.top
-
-        scale = min(w, h) / float(RING_W)
-        count = dock_slot_count()
-        # 几何参数必须跟 panel.js 里的一致，否则区域和画出来的扇区错位
-        ok = set_sectors_region(
-            hwnd, w, h, count,
-            RING_R_OUT * scale, RING_R_IN * scale, RING_RC * scale, RING_MAX_HALF,
-        )
-        log(f"扇形区域 {'已设置' if ok else '设置失败'} 窗口 {w}x{h} {count} 块")
-
     def _on_dock_closed(self) -> None:
         self.dock = None
         log("拓展坞已关闭")
 
     def close_dock(self) -> None:
+        if self.ring is not None and self.ring.is_open:
+            self.ring.close(animated=False)
         win = self.dock
         self.dock = None
         if win is not None:
@@ -1236,11 +1102,33 @@ class App:
     def request_quit(self) -> None:
         self.quitting = True
         self.close_dock()
+        # 圆环坞的窗口是常驻复用的，hide 不等于结束 —— 退出时必须真销毁，
+        # 否则它的消息循环线程会一直吊着。
+        if self.ring is not None:
+            self.ring.destroy()
         try:
             if self.main is not None:
                 self.main.destroy()
         except Exception as e:
             log(f"销毁主窗口失败：{e}")
+
+
+def warm_ring_backend() -> None:
+    """后台预热圆环坞的 GDI+ 栈。
+
+    `clr.AddReference("System.Drawing")` 首次要 800ms 以上。不预热的话，用户
+    第一次按热键唤坞会等整整一秒才看到东西 —— 那正是"点了没反应"的观感。
+    放后台跑，等真正唤出时 `_load_gdip()` 直接命中缓存。
+    """
+    t0 = time.perf_counter()
+    try:
+        import numpy  # noqa: F401  每帧的预乘 alpha 转换要用，一起预热掉
+        import ring
+
+        ring._load_gdip()
+        log(f"GDI+ 已预热（{int((time.perf_counter() - t0) * 1000)}ms）")
+    except Exception as e:
+        log(f"GDI+ 预热失败（不影响面板形态）：{type(e).__name__}: {e}")
 
 
 def main() -> int:
@@ -1307,6 +1195,9 @@ def main() -> int:
     def on_ready() -> None:
         """WebView2 的宿主窗口这时才真正存在，可以刷底色了。"""
         app._paint_form_backdrop(app.main, (11, 14, 20))  # #0b0e14 = --bg
+        # pythonnet 要到 webview.start() 之后才真正 load。放在 main() 里会拿到
+        # 一个还没有 AddReference 的 clr stub，预热直接 AttributeError。
+        threading.Thread(target=warm_ring_backend, daemon=True).start()
 
     app.main.events.loaded += on_ready
 
