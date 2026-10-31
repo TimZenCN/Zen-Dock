@@ -4,9 +4,15 @@
 
 `Node 20+` · `零依赖` · `无构建步骤` · `MIT` · `Windows`
 
-[English](README.en.md) | 简体中文
+[English](README.en.md) | 简体中文 |
 
-<img src="docs/images/main.png" width="880" alt="Zen-Dock 主界面">
+![Zen-Dock 主界面](docs/images/main.png)
+
+## 环境要求
+
+- **核心**：Node 20+，零依赖
+- **桌面窗口**：Python 3.10+ + 系统 WebView2 运行时
+- Windows 是主要目标平台。Linux/macOS 上核心能跑，桌面外壳的 Windows 分支会退化
 
 ## 特性
 
@@ -55,33 +61,31 @@ node index.mjs --port 7718     # 换端口（hub 端口用 --hub-port）
 
 按 `Alt+X`，在鼠标位置弹出。八块扇形：主页固定在 12 点，其余按设置里的顺序顺时针排。每块带图标、名字和状态色——绿=运行中、红=失败、灰=停止。
 
-<img src="docs/images/ring.png" width="420" alt="圆环坞">
+![圆环坞](docs/images/ring.png)
 
 点空白处或再按一次热键关闭，有收起动画。动画时长在设置里调（100~800ms）。
-
-**为什么用 GDI+ 而不是 HTML：** 圆环要求形状外完全透明、边缘有抗锯齿、第一帧就是完整 UI。WebView2 的 `DefaultBackgroundColor` 只接受 alpha 0 或 255，alpha=0 时拿宿主窗口像素当背景；`SetWindowRgn` 是 1-bit 掩码。两条合起来，形状内的洞、半透明、平滑边缘一个都做不出来。所以换成了 Win32 分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`）自绘，唤出 20~50ms，没有中间态。
 
 ### 设置
 
 左侧五个分组：通用 / 窗口 / 快捷坞 / 系统 / 关于。
 
-<img src="docs/images/settings.png" width="720" alt="设置页">
+![设置页](docs/images/settings.png)
 
 ### 关于
 
 版本、作者、许可证、环境、路径、快捷键。
 
-<img src="docs/images/about.png" width="720" alt="关于页">
+![关于页](docs/images/about.png)
 
 元数据都从 `package.json` 读（`author` / `repository` / `license`），代码里不写死。版本检查走服务端请求 GitHub 的 `releases/latest`，结果缓存 10 分钟（未认证 API 只有 60 次/小时）。
 
 ## 三种 item
 
-| kind | 干什么 | 关键字段 |
-|---|---|---|
-| `service` | 常驻进程，有端口、能探活、能启停 | `cmd` `args` `cwd` `port` `url` `urlFrom` |
-| `script` | 一次性脚本，点一下跑完 | `shell` `path` `params` |
-| `page` | 静态页面/目录，挂在 `/s/<id>/` | `dir` `entry` |
+| kind      | 干什么                   | 关键字段                                      |
+| --------- | --------------------- | ----------------------------------------- |
+| `service` | 常驻进程，有端口、能探活、能启停      | `cmd` `args` `cwd` `port` `url` `urlFrom` |
+| `script`  | 一次性脚本，点一下跑完           | `shell` `path` `params`                   |
+| `page`    | 静态页面/目录，挂在 `/s/<id>/` | `dir` `entry`                             |
 
 ```json
 {
@@ -268,12 +272,6 @@ node test-scripts/dedupe-e2e.mjs     # 真起进程验证接管，7 项
 ```
 
 改 UI 之后用 `snap_panel.py` 快速看效果，不用反复开关窗口。
-
-## 环境
-
-- **核心**：Node 20+，零依赖
-- **桌面窗口**：Python 3.10+ + 系统 WebView2 运行时
-- Windows 是主要目标平台。Linux/macOS 上核心能跑，桌面外壳的 Windows 分支会退化
 
 ## 许可证
 

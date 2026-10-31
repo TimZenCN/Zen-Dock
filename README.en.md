@@ -8,6 +8,12 @@ English | [简体中文](README.md)
 
 <img src="docs/images/main.png" width="880" alt="Zen-Dock main window">
 
+## Requirements
+
+- **Core:** Node 20+, zero dependencies
+- **Desktop window:** Python 3.10+ and the system WebView2 runtime
+- Windows is the primary target. The core runs on Linux/macOS; the desktop shell degrades there.
+
 ## Features
 
 - **Zero dependencies, no build step.** No `npm install`, no bundler. `node index.mjs` and you're up.
@@ -58,8 +64,6 @@ Press `Alt+X` and it appears at the cursor. Eight sectors: Home is pinned at 12 
 <img src="docs/images/ring.png" width="420" alt="Ring dock">
 
 Click empty space or press the hotkey again to dismiss, with a collapse animation. Duration is configurable (100–800ms).
-
-**Why GDI+ instead of HTML:** the ring needs to be fully transparent outside its shape, anti-aliased at the edges, and complete on the first frame. WebView2's `DefaultBackgroundColor` only accepts alpha 0 or 255 — at 0 it renders the host window's pixels as the background — and `SetWindowRgn` is a 1-bit mask. Together they rule out holes inside the shape, translucency, and smooth edges. So the ring became a Win32 layered window (`WS_EX_LAYERED` + `UpdateLayeredWindow`) painted directly: 20–50ms to appear, no intermediate state.
 
 ### Settings
 
@@ -268,12 +272,6 @@ node test-scripts/dedupe-e2e.mjs     # real processes, adoption, 7 cases
 ```
 
 Use `snap_panel.py` to check UI changes without opening and closing the window repeatedly.
-
-## Requirements
-
-- **Core:** Node 20+, zero dependencies
-- **Desktop window:** Python 3.10+ and the system WebView2 runtime
-- Windows is the primary target. The core runs on Linux/macOS; the desktop shell degrades there.
 
 ## License
 
