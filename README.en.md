@@ -1,5 +1,7 @@
 # Zen-Dock
 
+[![CI](https://github.com/TimZenCN/Zen-Dock/actions/workflows/ci.yml/badge.svg)](https://github.com/TimZenCN/Zen-Dock/actions/workflows/ci.yml)
+
 **A local service panel.** Supervise long-running services, fire one-shot scripts, and serve static pages — all from one window.
 
 `Node 20+` · `Zero dependencies` · `No build step` · `MIT` · `Windows`
@@ -18,6 +20,7 @@ English | [简体中文](README.md)
 
 - **Zero dependencies, no build step.** No `npm install`, no bundler. `node index.mjs` and you're up.
 - **Three kinds of things, one panel.** Long-running services (with ports and health checks), one-shot scripts (PS1 / PY / BAT), and static pages.
+- **Logs outlive the hub.** One file per service at `logs/<id>.log`, timestamped and tagged by stream, rotated at 2MB. After a crash and a restart, the output is still there.
 - **A real desktop window.** Not a browser wrapper: frameless, self-drawn title bar, tray, global hotkey, launch on login.
 - **Ring dock.** Hit `Alt+X` and eight sectors bloom around your cursor — one click to start. True per-pixel alpha, not fake transparency.
 - **CLI.** `zd` covers everything, with `--json` output for scripts and AI agents.
@@ -214,7 +217,7 @@ No token, because it's local-only. For LAN access you'd add your own.
 ## Known limitations
 
 - **Absolute paths in static pages 404.** The site root is `/s/<id>/`, not the domain root, so `/css/a.css` won't resolve. Injecting `<base>` only fixes relative paths.
-- **Logs are in memory only.** 500 lines per item by default, gone on restart.
+- **On-disk logs keep one generation.** `logs/<id>.log` rotates to `.log.1` at 2MB, overwriting the previous one. They answer "where did it just crash", not "what happened last month". The in-memory buffer holds 500 lines for SSE replay and matches the file.
 - **No reverse proxy.** Each service keeps its own port; the hub only discovers, starts, stops, and links.
 - **The desktop shell is Windows-only in practice.** `taskkill`, `CREATE_NO_WINDOW`, `MessageBoxW` are Windows branches, and it needs the system WebView2 runtime.
 - **Long names don't fit in the ring.** Two limits: character count (CJK = 2 units, others = 1, cap 10 units = 5 CJK chars), then pixel width (~85px at 13px bold). Overflow gets an ellipsis; use `shortName` to control it.
@@ -241,7 +244,7 @@ lib/
   config.js                  config validation (atomic writes) + path resolution
   services.js                spawn / health check / kill / adopt / dedupe
   scripts.js                 three shells + argument building
-  logs.js                    ring buffer + GBK fallback decoding
+  logs.js                    ring buffer + disk rotation + GBK fallback decoding
   sites.js                   static hosting + <base> injection
   system.js                  browser / explorer / autostart / about info
   panel.js                   admin page + panel dock (inline CSS/JS)
@@ -252,16 +255,31 @@ shell/
   hotkey.py                  global hotkey (RegisterHotKey)
   setup.bat                  creates .venv on first run
 sites/<id>/                  static pages
+logs/<id>.log                per-service logs (generated at runtime, ignored)
 test-scripts/                tests and diagnostics
+  run.mjs                    single entry point (what `npm test` runs)
+  fixtures/                  smoke fixtures for the three shells
 docs/images/                 README screenshots
 ```
 
 ## Development
 
 ```bash
+npm test            # syntax + logs + fingerprint matching; no hub, no .venv
+npm run test:all    # adds the end-to-end checks that need a running hub
+```
+
+`npm test` is what CI runs. Four groups: `node --check` over 18 JS files,
+`py_compile` over 4 Python files (skipped without a `.venv`), `logs.mjs`
+(34 cases), and `dedupe.mjs` (9 cases).
+
+Running one on its own:
+
+```bash
 node test-scripts/smoke.mjs          # three shells, smoke (start hub first)
 node test-scripts/dedupe.mjs         # command-line fingerprint matching, 9 cases
 node test-scripts/dedupe-e2e.mjs     # real processes, adoption, 7 cases
+node test-scripts/logs.mjs           # disk write / rotation / clear / bad ids, 34 cases
 
 .venv/Scripts/python.exe test-scripts/probe_ring_draw.py         # bitmap alpha
 .venv/Scripts/python.exe test-scripts/probe_ring_window.py       # Win32 plumbing

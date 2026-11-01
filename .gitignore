@@ -30,5 +30,7 @@ test-scripts/*.html
 # 依赖与杂项
 node_modules/
 *.log
+# 各服务的落盘日志（logs/<id>.log 和轮转出来的 .log.1）
+logs/
 .DS_Store
 Thumbs.db

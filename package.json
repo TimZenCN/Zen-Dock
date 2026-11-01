@@ -20,7 +20,9 @@
   },
   "scripts": {
     "start": "node index.mjs",
-    "cli": "node bin/zd.mjs"
+    "cli": "node bin/zd.mjs",
+    "test": "node test-scripts/run.mjs",
+    "test:all": "node test-scripts/run.mjs --all"
   },
   "engines": {
     "node": ">=20"

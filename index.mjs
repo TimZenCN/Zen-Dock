@@ -3,7 +3,8 @@
 // 零依赖，node index.mjs 直接跑。
 
 import { spawn } from 'node:child_process';
-import { loadConfig, CONFIG_PATH } from './lib/config.js';
+import path from 'node:path';
+import { loadConfig, CONFIG_PATH, ROOT } from './lib/config.js';
 import { LogStore } from './lib/logs.js';
 import { ServiceManager } from './lib/services.js';
 import { ScriptRunner } from './lib/scripts.js';
@@ -54,7 +55,12 @@ try {
 if (args.port) config.port = args.port;
 if (args.host) config.host = args.host;
 
-const logs = new LogStore({ maxLines: config.logLines });
+// 日志同时进内存（给 SSE 回放）和落盘（hub 重启后还能翻）。
+// 落盘目录固定 logs/，和 shell/*.log（外壳自己的日志）分开。
+const logs = new LogStore({
+  maxLines: config.logLines,
+  dir: path.join(ROOT, 'logs'),
+});
 const services = new ServiceManager({ config, logs });
 const scripts = new ScriptRunner({ config, logs });
 
@@ -97,10 +103,13 @@ async function shutdown(signal) {
   console.log(`\n[${signal}] 正在退出…`);
   await services.shutdown();
   await hub.close();
+  logs.close(); // 把攒着没刷的日志写盘
   process.exit(0);
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+// 被 taskkill /F 时 SIGINT 收不到，但正常退出会走这里
+process.on('exit', () => logs.close());
 process.on('uncaughtException', (e) => {
   console.error('[uncaught]', e);
 });

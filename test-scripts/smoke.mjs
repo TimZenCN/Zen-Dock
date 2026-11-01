@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const BASE = 'http://127.0.0.1:7717';
 // 从本文件位置推导，换机器/换盘符都不用改
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const FIXTURES = path.join(ROOT, 'fixtures');
 
 async function api(path, opts = {}) {
   const r = await fetch(BASE + path, {
@@ -34,8 +35,8 @@ for (const c of cases) {
       kind: 'script',
       name: c.name,
       shell: c.shell,
-      path: path.join(ROOT, c.file),
-      cwd: ROOT,
+      path: path.join(FIXTURES, c.file),
+      cwd: FIXTURES,
     }),
   });
 

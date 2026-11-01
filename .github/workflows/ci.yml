@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 只读就够，不需要写 token
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 是 package.json engines 的下限，22 是当前 LTS
+        node: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 没有 npm install —— 这个项目零依赖，这是它最硬的卖点，
+      # 也是 CI 能在几十秒内跑完的原因。
+      #
+      # 端到端（smoke.mjs / dedupe-e2e.mjs）需要真实进程和 Windows 桌面环境，
+      # 在 Linux runner 上跑不了，留在本地 `npm run test:all`。
+      - name: 跑离线测试
+        run: npm test

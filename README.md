@@ -1,5 +1,7 @@
 # Zen-Dock
 
+[![CI](https://github.com/TimZenCN/Zen-Dock/actions/workflows/ci.yml/badge.svg)](https://github.com/TimZenCN/Zen-Dock/actions/workflows/ci.yml)
+
 **本地服务面板。** 把常驻服务管起来、把一次性脚本点着跑、把静态页面挂上去——全在一个窗口里。
 
 `Node 20+` · `零依赖` · `无构建步骤` · `MIT` · `Windows`
@@ -18,6 +20,7 @@
 
 - **零依赖、无构建。** 不需要 `npm install`，没有打包器，源码直交付。`node index.mjs` 就能跑。
 - **三种东西一种管法。** 常驻服务（有端口、能探活）、一次性脚本（PS1 / PY / BAT）、静态页面，同一个界面。
+- **日志活过重启。** 每个服务一份 `logs/<id>.log`，带时间戳和来源标记，超过 2MB 自动轮转。崩溃之后重启 hub 还能翻到当时的输出。
 - **真正的桌面窗口。** 不是浏览器套壳：无边框、自绘标题栏、托盘常驻、全局热键、开机自启。
 - **圆环坞。** 按 `Alt+X` 在鼠标周围弹出八块扇形，点一下就启动。真 per-pixel alpha，不是伪透明。
 - **命令行。** `zd` 管理全部功能，支持 `--json`，适合脚本和 AI 调用。
@@ -214,7 +217,7 @@ zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
 ## 已知限制
 
 - **静态页面的绝对路径会 404。** 站点根是 `/s/<id>/` 不是域名根，`/css/a.css` 找不到。注入 `<base>` 只能修好相对路径。
-- **日志只在内存。** 每项默认 500 行，重启即丢。
+- **落盘日志只留一代。** `logs/<id>.log` 超过 2MB 轮转成 `.log.1`，旧的直接覆盖。日志用来定位「最近崩在哪」，不是审计归档。内存里另外保留 500 行给 SSE 回放，两者内容一致。
 - **不做反向代理。** 各服务保留自己的端口，hub 只负责发现、启停、跳转。
 - **桌面外壳只在 Windows 测过。** `desktop.py` 里的 `taskkill`、`CREATE_NO_WINDOW`、`MessageBoxW` 都是 Windows 分支，依赖系统 WebView2 运行时。
 - **圆环的名字放不下太长。** 先按字数（中文 2 单位、其他 1，上限 10 单位 = 5 个汉字），再按像素兜底（13px 粗体下弧长约 85px）。超了截断加省略号，用 `shortName` 可以控制。
@@ -241,7 +244,7 @@ lib/
   config.js                  配置读写校验（原子写）+ 相对路径解析
   services.js                常驻进程：spawn / 探活 / 强杀 / 接管 / 去重
   scripts.js                 三种 shell + 参数拼接
-  logs.js                    环形缓冲 + GBK 回退解码
+  logs.js                    环形缓冲 + 落盘轮转 + GBK 回退解码
   sites.js                   静态托管 + <base> 注入
   system.js                  开浏览器 / 开资源管理器 / 开机自启 / 关于信息
   panel.js                   管理页 + 面板坞（内联 CSS/JS）
@@ -252,16 +255,30 @@ shell/
   hotkey.py                  全局热键（RegisterHotKey）
   setup.bat                  首次建 .venv
 sites/<id>/                  静态页面
+logs/<id>.log                各服务的落盘日志（运行时生成，已忽略）
 test-scripts/                测试与诊断脚本
+  run.mjs                    统一入口（npm test 调的就是它）
+  fixtures/                  三种 shell 的冒烟夹具
 docs/images/                 README 配图
 ```
 
 ## 开发与测试
 
 ```bash
+npm test        # 语法 + 日志 + 指纹匹配，不需要 hub、不需要 .venv
+npm run test:all   # 再加上需要 hub 的端到端
+```
+
+`npm test` 是 CI 跑的那一份，分四组：18 个 JS 文件 `node --check`、4 个 Python 文件
+`py_compile`（有 `.venv` 才跑）、`logs.mjs` 34 项、`dedupe.mjs` 9 项。
+
+需要单独跑某一个：
+
+```bash
 node test-scripts/smoke.mjs          # 三种 shell 冒烟（先起 hub）
 node test-scripts/dedupe.mjs         # 命令行指纹匹配，9 项
 node test-scripts/dedupe-e2e.mjs     # 真起进程验证接管，7 项
+node test-scripts/logs.mjs           # 落盘 / 轮转 / 清空 / 非法 id，34 项
 
 .venv/Scripts/python.exe test-scripts/probe_ring_draw.py         # 位图 alpha
 .venv/Scripts/python.exe test-scripts/probe_ring_window.py       # Win32 链路
