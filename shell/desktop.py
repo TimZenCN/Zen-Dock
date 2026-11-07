@@ -8,7 +8,7 @@
 行为：
 1. 探测 127.0.0.1:<port>。已经在跑就直接连过去，不碰它。
 2. 没在跑就拉起 `node index.mjs --no-open`，等端口就绪。
-3. 开主窗口（--hidden 时不显示，直接进托盘）。
+3. 开主窗口（--hidden 时进托盘，窗口和 WebView2 留到第一次真正需要再建）。
 4. 注册全局热键，按下时在鼠标附近弹出拓展坞。
 5. 窗口关掉之后，只清理自己拉起来的那个 node 进程。
 
@@ -611,6 +611,13 @@ class App:
         self.hotkey_want = read_settings().get("hotkey") or "alt+x"
         self.quitting = False
         self.api = Api(self)
+        # 静默启动不建主窗口，主线程要靠这个事件被叫醒（见 wait_for_main_request）
+        self._window_requested = threading.Event()
+        self._window_show = True   # 被叫醒时主窗口要不要显示（面板坞只需要 GUI 循环）
+        self._pending_dock = False # 叫醒原因：面板形态的坞要等 GUI 循环起来再开
+        self._page_ready = False   # 页面 load 完之前，JS 调用先排队
+        self._pending_js = []
+        self._flash_on_load = False
         self._main_hwnd = 0        # 主窗口句柄缓存
         self.maxed = False         # 自绘最大化状态（无边框窗口不能靠 IsZoomed 判断）
         self._restore_rect = None  # 最大化前的窗口矩形
@@ -825,7 +832,11 @@ class App:
     # ---- 窗口 ----
     def show_main(self) -> None:
         if self.main is None:
-            log("show_main: 主窗口对象是 None，跳过")
+            # 静默启动时窗口还没建。pywebview.start() 只能跑在主线程上，
+            # 这里把请求交给主线程，由它建窗口并起 GUI 循环。
+            log("show_main: 主窗口还没建，转交主线程创建")
+            self._window_show = True
+            self._window_requested.set()
             return
         try:
             self.main.show()
@@ -850,14 +861,35 @@ class App:
         self.call_main_js("flashIn", {})
 
     def call_main_js(self, fn: str, arg) -> None:
-        if self.main is None:
+        if self.main is None or not self._page_ready:
+            # 窗口是懒创建的，页面可能还没 load 完（比如圆环里点「日志」）。
+            # 先排队，mark_page_ready 时统一补发，否则这一下会静默丢掉。
+            self._pending_js.append((fn, arg))
             return
+        self._eval_main_js(fn, arg)
+
+    def _eval_main_js(self, fn: str, arg) -> None:
         try:
             self.main.evaluate_js(
                 "window.__zenDock && window.__zenDock.%s(%s)" % (fn, json.dumps(arg))
             )
         except Exception as e:
             log(f"调用主窗口 JS 失败：{e}")
+
+    def mark_page_ready(self) -> None:
+        self._page_ready = True
+        pending, self._pending_js = self._pending_js, []
+        for fn, arg in pending:
+            self._eval_main_js(fn, arg)
+
+    def wait_for_main_request(self) -> None:
+        """静默启动：主线程在这里让位，直到托盘/唤醒口/圆环第一次要窗口。
+
+        托盘（pystray）和热键（RegisterHotKey + 自己的消息循环）都是独立线程，
+        所以主线程可以什么都不跑；真正要的是 pywebview.start() 必须由主线程调。
+        """
+        self._window_requested.wait()
+        self._window_requested.clear()
 
     # ---- 拓展坞 ----
     def toggle_dock(self) -> None:
@@ -877,6 +909,15 @@ class App:
         # 面板形态还是 pywebview —— 它是规规矩矩的矩形窗口，不需要透明。
         if (read_settings().get("dockMode") or "ring") == "ring":
             self._open_ring()
+            return
+
+        if self.main is None:
+            # 面板坞也要 pywebview 的 GUI 循环。静默启动下先让主线程建窗口
+            # （隐藏着，不打扰），循环起来后再由 on_ready 把坞开出来。
+            log("面板坞需要 GUI 循环，转交主线程创建")
+            self._pending_dock = True
+            self._window_show = False
+            self._window_requested.set()
             return
 
         if self.dock is not None:
@@ -985,7 +1026,7 @@ class App:
         位图逐像素决定，压根没有"窗体底色"这回事。
         """
         try:
-            import clr  # pythonnet，pywebview 启动时已加载
+            import clr  # pythonnet：预热线程或 pywebview 已经加载过它
             clr.AddReference("System.Drawing")
             from System.Drawing import Color
 
@@ -1105,6 +1146,7 @@ class App:
     # ---- 退出 ----
     def request_quit(self) -> None:
         self.quitting = True
+        self._window_requested.set()  # 主线程可能正卡在等窗口请求
         self.close_dock()
         # 圆环坞的窗口是常驻复用的，hide 不等于结束 —— 退出时必须真销毁，
         # 否则它的消息循环线程会一直吊着。
@@ -1175,56 +1217,69 @@ def main() -> int:
 
     app = App(args.port, args.host)
 
-    app.main = webview.create_window(
-        "Zen-Dock",
-        url=f"http://{args.host}:{args.port}/",
-        width=1280,
-        height=860,
-        min_size=(900, 600),
-        background_color="#0b0e14",
-        hidden=args.hidden,
-        # 主窗口也是无边框：标题栏和窗口按钮由页面自绘（panel.js 的 #titlebar），
-        # 边框则内化成一圈 inset 描边，跟拓展坞的无边框风格统一。
-        frameless=True,
-        easy_drag=False,  # 拖动自己做，否则整页都能拖，点按钮会误拖窗口
-        shadow=False,
-        js_api=app.api,
-    )
+    def build_main(show: bool) -> None:
+        """建主窗口（连同 WebView2）。静默启动时留到第一次需要才调。"""
+        WEBVIEW_DATA.mkdir(parents=True, exist_ok=True)
+        app.main = webview.create_window(
+            "Zen-Dock",
+            url=f"http://{args.host}:{args.port}/",
+            width=1280,
+            height=860,
+            min_size=(900, 600),
+            background_color="#0b0e14",
+            hidden=not show,
+            # 主窗口也是无边框：标题栏和窗口按钮由页面自绘（panel.js 的 #titlebar），
+            # 边框则内化成一圈 inset 描边，跟拓展坞的无边框风格统一。
+            frameless=True,
+            easy_drag=False,  # 拖动自己做，否则整页都能拖，点按钮会误拖窗口
+            shadow=False,
+            js_api=app.api,
+        )
 
-    # 主窗口有了对象才起唤醒口，避免第二个实例在窗口就绪前打进来打空
+        def on_ready() -> None:
+            """WebView2 的宿主窗口这时才真正存在，可以刷底色了。"""
+            app._paint_form_backdrop(app.main, (11, 14, 20))  # #0b0e14 = --bg
+            app.mark_page_ready()
+            if app._flash_on_load:
+                app.call_main_js("flashIn", {})
+            if app._pending_dock:
+                app._pending_dock = False
+                app.open_dock()
+
+        app.main.events.loaded += on_ready
+
+        def on_closing() -> bool:
+            """返回 False 可以拦下这次关闭。"""
+            if app.quitting:
+                return True
+            action = read_settings().get("closeAction", "quit")
+            if action == "tray" or args.hidden:
+                if app.tray.ensure(app):
+                    app.main.hide()
+                    log("已最小化到托盘")
+                    return False
+                log("托盘不可用，改为直接退出")
+            return True
+
+        app.main.events.closing += on_closing
+
+    # 托盘、热键、圆环坞都不依赖主窗口；静默启动先把它们拉起来，
+    # WebView2 那一整套（含 .NET CLR）等到第一次真正要窗口时再初始化。
+    if args.hidden:
+        app.tray.ensure(app)  # 没有托盘就没人能把窗口叫出来
+    else:
+        build_main(show=True)
+
+    # 唤醒口要在等待之前就位，否则第二个实例起来时找不到入口
     wake_port = start_wake_server(app.show_main)
     write_instance(wake_port)
     log(f"单实例已就位，唤醒口 127.0.0.1:{wake_port}")
 
-    def on_ready() -> None:
-        """WebView2 的宿主窗口这时才真正存在，可以刷底色了。"""
-        app._paint_form_backdrop(app.main, (11, 14, 20))  # #0b0e14 = --bg
-        # pythonnet 要到 webview.start() 之后才真正 load。放在 main() 里会拿到
-        # 一个还没有 AddReference 的 clr stub，预热直接 AttributeError。
-        threading.Thread(target=warm_ring_backend, daemon=True).start()
-
-    app.main.events.loaded += on_ready
-
-    def on_closing() -> bool:
-        """返回 False 可以拦下这次关闭。"""
-        if app.quitting:
-            return True
-        action = read_settings().get("closeAction", "quit")
-        if action == "tray" or args.hidden:
-            if app.tray.ensure(app):
-                app.main.hide()
-                log("已最小化到托盘")
-                return False
-            log("托盘不可用，改为直接退出")
-        return True
-
-    app.main.events.closing += on_closing
-
-    if args.hidden:
-        # 静默启动：窗口不显示，但托盘必须在，否则没法唤出来
-        app.tray.ensure(app)
-
     app.start_hotkey()
+
+    # 圆环坞的 GDI+ 栈独立预热：静默启动可能一整天都不建窗口，
+    # 而热键随时可能唤坞，不能把预热挂在主窗口的 loaded 事件上。
+    threading.Thread(target=warm_ring_backend, daemon=True).start()
 
     try:
         if args.auto_close:
@@ -1235,12 +1290,20 @@ def main() -> int:
 
             threading.Thread(target=_closer, daemon=True).start()
 
-        webview.start(
-            gui="edgechromium",
-            private_mode=False,
-            storage_path=str(WEBVIEW_DATA),
-            icon=str(ICON) if ICON.exists() else None,
-        )
+        if args.hidden:
+            log("静默启动：主窗口延迟到第一次需要时创建")
+            app.wait_for_main_request()
+            if not app.quitting:
+                app._flash_on_load = bool(app._window_show)
+                build_main(show=app._window_show)
+
+        if not app.quitting:
+            webview.start(
+                gui="edgechromium",
+                private_mode=False,
+                storage_path=str(WEBVIEW_DATA),
+                icon=str(ICON) if ICON.exists() else None,
+            )
     except Exception as e:
         alert("Zen-Dock", f"窗口启动失败：\n{type(e).__name__}: {e}")
         app.hotkey.stop()
@@ -1252,7 +1315,7 @@ def main() -> int:
     app.hotkey.stop()
     app.tray.stop()
     clear_instance()
-    log("窗口已关闭")
+    log("窗口已关闭" if app.main is not None else "主窗口未创建，直接退出")
     kill_tree(server_proc)
     log("退出")
     return 0

@@ -46,7 +46,7 @@ The window is frameless; the title bar and the three window buttons are drawn by
 
 - Drag the title bar to move, double-click to maximize, 5px edge zones to resize
 - What closing does is a setting: quit, or minimize to tray
-- `--hidden` starts straight into the tray (**this is what launch-on-login registers**, so nothing pops up at boot)
+- `--hidden` starts straight into the tray (**this is what launch-on-login registers**, so nothing pops up at boot); the main window and WebView2 are created on first open.
 
 **The shell is optional.** `index.mjs` stays a zero-dependency Node server — skip pywebview and use the browser. If something is already listening on the port, the window attaches to it, and closing the window **won't** kill that server.
 
@@ -223,6 +223,7 @@ No token, because it's local-only. For LAN access you'd add your own.
 - **No reverse proxy.** Each service keeps its own port; the hub only discovers, starts, stops, and links.
 - **The desktop shell is Windows-only in practice.** `taskkill`, `CREATE_NO_WINDOW`, `MessageBoxW` are Windows branches, and it needs the system WebView2 runtime.
 - **Long names don't fit in the ring.** Two limits: character count (CJK = 2 units, others = 1, cap 10 units = 5 CJK chars), then pixel width (~85px at 13px bold). Overflow gets an ellipsis; use `shortName` to control it.
+- **Silent start creates no main window.** WebView2 is initialized on the first request from the tray, the wake socket, or the ring's home button, which adds ~0.3–0.6s; once created, it also stays resident while hidden in the tray until the app exits.
 - **The ring gets clipped near screen edges.** The window centers on the cursor without clamping — clamping would offset the ring from the cursor. Deliberate trade-off.
 - **The panel dock has no exit animation on focus loss.** That path destroys the window directly from Python; calling WebView2's `evaluate_js` from a worker thread hits COM threading restrictions. JS-controlled exits (clicking a card, opening logs) do fade out. Restoring the main window from the tray fades in inside the page, not at the Win32 layer.
 - **Hotkeys are globally exclusive.** Once registered, no other app receives that combo. Change it in Settings if it collides.
