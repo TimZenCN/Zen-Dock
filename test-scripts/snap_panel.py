@@ -58,6 +58,8 @@ SETTINGS = {
     "browser": "",
     "hotkey": "alt+x",
     "dockMode": "ring",
+    "dockAnimMs": 340,
+    "animations": "full",
     "dockItems": ["dsh-web", "relay", "relay-ps", "liuli-engine", "liuli-editor", "liuli-encrypt", "demo"],
 }
 

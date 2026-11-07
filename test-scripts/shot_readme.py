@@ -164,8 +164,9 @@ def main() -> int:
         # main 是纯网格页，截高了再裁；settings / about 有全高抽屉，
         # 底部行本身就有遮罩色 + 抽屉色两种，裁不动，只能按内容高度截
         ("main", "", 860),
+        ("motion", open_pane("general"), 700),
         ("settings", open_pane("dock"), 640),
-        ("about", open_pane("about"), 860),
+        ("about", open_pane("about"), 900),
     ]
 
     for name, extra, height in jobs:

@@ -3,6 +3,11 @@
   "port": 7717,
   "logLines": 500,
   "startTimeoutMs": 15000,
+  "settings": {
+    "dockMode": "ring",
+    "dockAnimMs": 340,
+    "animations": "full"
+  },
   "items": [
     {
       "id": "demo",

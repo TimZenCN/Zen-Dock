@@ -66,13 +66,15 @@ Press `Alt+X` and it appears at the cursor. Eight sectors: Home is pinned at 12 
 
 <img src="docs/images/ring.png" width="420" alt="Ring dock">
 
-Click empty space or press the hotkey again to dismiss, with a collapse animation. Duration is configurable (100–800ms).
+Click empty space or press the hotkey again to dismiss, with a collapse animation. Entrance uses an overshoot curve; exit is its exact mirror (a brief wind-up, then collapse). Hovering a sector crossfades its color over 120ms. Frames are time-driven by the message loop rather than `WM_TIMER` — repeated invocations hold a steady 22 frames / 366ms.
 
 ### Settings
 
-Five groups on the left: General / Window / Dock / System / About.
+Five groups on the left: General / Window / Dock / System / About. **Animation** lives under General: mode (full / reduced / off) and a tempo slider (100–800ms). The tempo is a global baseline — both the ring's bloom duration and the multiplier for every UI transition — with live preview while dragging. If the OS requests reduced motion, "full" automatically degrades to "reduced".
 
 <img src="docs/images/settings.png" width="720" alt="Settings">
+
+<img src="docs/images/motion.png" width="720" alt="Animation settings">
 
 ### About
 
@@ -222,6 +224,7 @@ No token, because it's local-only. For LAN access you'd add your own.
 - **The desktop shell is Windows-only in practice.** `taskkill`, `CREATE_NO_WINDOW`, `MessageBoxW` are Windows branches, and it needs the system WebView2 runtime.
 - **Long names don't fit in the ring.** Two limits: character count (CJK = 2 units, others = 1, cap 10 units = 5 CJK chars), then pixel width (~85px at 13px bold). Overflow gets an ellipsis; use `shortName` to control it.
 - **The ring gets clipped near screen edges.** The window centers on the cursor without clamping — clamping would offset the ring from the cursor. Deliberate trade-off.
+- **The panel dock has no exit animation on focus loss.** That path destroys the window directly from Python; calling WebView2's `evaluate_js` from a worker thread hits COM threading restrictions. JS-controlled exits (clicking a card, opening logs) do fade out. Restoring the main window from the tray fades in inside the page, not at the Win32 layer.
 - **Hotkeys are globally exclusive.** Once registered, no other app receives that combo. Change it in Settings if it collides.
 - **The tray icon may be collapsed by Windows.** New icons go into the `^` overflow by default; drag it out to pin it.
 - **Ctrl+C for `zd` is only reliable in a real terminal.** Windows has no POSIX signals; `kill -INT` from Git Bash may not arrive. Press it again — the second one force-quits.
@@ -284,6 +287,7 @@ node test-scripts/logs.mjs           # disk write / rotation / clear / bad ids, 
 .venv/Scripts/python.exe test-scripts/probe_ring_draw.py         # bitmap alpha
 .venv/Scripts/python.exe test-scripts/probe_ring_window.py       # Win32 plumbing
 .venv/Scripts/python.exe test-scripts/probe_ring_transparent.py  # screen composition
+.venv/Scripts/python.exe test-scripts/probe_ring_fps.py          # frame rate / stability, 3 runs
 
 .venv/Scripts/python.exe test-scripts/snap_panel.py              # UI screenshots
 .venv/Scripts/python.exe test-scripts/shot_readme.py             # README images

@@ -66,13 +66,15 @@ node index.mjs --port 7718     # 换端口（hub 端口用 --hub-port）
 
 ![圆环坞](docs/images/ring.png)
 
-点空白处或再按一次热键关闭，有收起动画。动画时长在设置里调（100~800ms）。
+点空白处或再按一次热键关闭，有收起动画。入场是回弹曲线，退场是它的严格镜像（先蓄力再收走）；鼠标划过扇形时颜色有 120ms 渐变。帧由消息循环按时间自驱动，不依赖 `WM_TIMER`，实测复用唤出稳定 22 帧 / 366ms。
 
 ### 设置
 
-左侧五个分组：通用 / 窗口 / 快捷坞 / 系统 / 关于。
+左侧五个分组：通用 / 窗口 / 快捷坞 / 系统 / 关于。**动画**在「通用」里：模式（完整 / 减弱 / 关闭）、节奏滑块（100~800ms）。节奏是全局基准——既是圆环展开时长，也是所有界面动画的倍率；拖动即时预览。系统开启「减少动态效果」时，即便选「完整」也自动按「减弱」渲染。
 
 ![设置页](docs/images/settings.png)
+
+![动画设置](docs/images/motion.png)
 
 ### 关于
 
@@ -222,6 +224,7 @@ zd --json list | jq '.items[] | select(.runtime.status == "running") | .id'
 - **桌面外壳只在 Windows 测过。** `desktop.py` 里的 `taskkill`、`CREATE_NO_WINDOW`、`MessageBoxW` 都是 Windows 分支，依赖系统 WebView2 运行时。
 - **圆环的名字放不下太长。** 先按字数（中文 2 单位、其他 1，上限 10 单位 = 5 个汉字），再按像素兜底（13px 粗体下弧长约 85px）。超了截断加省略号，用 `shortName` 可以控制。
 - **圆环贴屏幕边缘会被切掉一部分。** 窗口按鼠标居中、不做 clamp（clamp 了圆心就跟鼠标错开），这是有意的取舍。
+- **面板坞失焦关闭没有退场动画。** 那条路径在 Python 侧直接销毁窗口，从子线程调 WebView2 的 `evaluate_js` 会撞 COM 线程限制。点卡片、看日志这些 JS 可控的关闭路径有淡出。主窗口从托盘唤起是页面内淡入，不是 Win32 层动画。
 - **热键是全局独占的。** 注册成功后别的程序收不到这个组合，撞了在设置里换一个。
 - **托盘图标可能被系统折叠。** Windows 默认把新图标塞进 `^` 区，需要自己拖出来固定。
 - **`zd` 的 Ctrl+C 只在真终端里可靠。** Windows 没有 POSIX 信号，从 Git Bash 用 `kill -INT` 可能到不了。按不动就再按一次，第二次强制退出。
@@ -283,6 +286,7 @@ node test-scripts/logs.mjs           # 落盘 / 轮转 / 清空 / 非法 id，34
 .venv/Scripts/python.exe test-scripts/probe_ring_draw.py         # 位图 alpha
 .venv/Scripts/python.exe test-scripts/probe_ring_window.py       # Win32 链路
 .venv/Scripts/python.exe test-scripts/probe_ring_transparent.py  # 屏幕合成
+.venv/Scripts/python.exe test-scripts/probe_ring_fps.py          # 三轮复用唤出帧率 / 稳定性
 
 .venv/Scripts/python.exe test-scripts/snap_panel.py              # 界面截图
 .venv/Scripts/python.exe test-scripts/shot_readme.py             # 生成 README 配图

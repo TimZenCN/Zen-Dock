@@ -60,7 +60,9 @@ SECTOR_HOVER = "#1f2a3a"
 SECTOR_RUNNING = "#1a2431"
 SECTOR_RUNNING_HOVER = "#22303f"
 SECTOR_BUSY = "#1a212e"
+SECTOR_BUSY_HOVER = "#232d3e"
 SECTOR_ERR = "#1e1a1c"
+SECTOR_ERR_HOVER = "#2b2023"
 SECTOR_HOME = "#141c28"
 SECTOR_HOME_HOVER = "#1a2433"
 
@@ -74,11 +76,18 @@ ICO = "#7d8799"
 ICO_HOVER = "#c9d4e3"
 ICO_HOME = "#7fb0e8"
 
-# ---- 动画参数：对齐 CSS 的 bloom / collapse ----
+# ---- 动画参数：和 CSS 侧共用同一套节奏（见 panel.js 的 --anim-* 变量）----
 BLOOM_MS = 340
 BLOOM_STAGGER_MS = 25
-COLLAPSE_MS = 190
+COLLAPSE_RATIO = 0.65        # 退场 / 入场；0.65 比原来的 0.56 更平衡
 FRAME_MS = 15
+HOVER_MS = 120               # hover 颜色渐变时长
+HOVER_STEPS = 8              # 渐变量化级数，让 brush 缓存能一直命中
+IDLE_POLL_MS = 120           # 无动画时的消息轮询间隔
+
+# 缓动曲线：退场是入场的严格镜像，视觉上「进得弹、退得也弹」。
+BACK_C1 = 1.70158
+BACK_C3 = BACK_C1 + 1
 
 # 图标按这个倍数放大。pen 宽度要除以它，否则描边会跟着变粗显得笨重。
 ICON_SCALE = 1.45
@@ -120,7 +129,16 @@ MONITOR_DEFAULTTONEAREST = 2
 MDT_EFFECTIVE_DPI = 0
 RGN_OR = 2
 WINDING = 2
-TIMER_ID = 1
+TIMER_ID = 1                  # 兼容保留：后台线程发 WM_TIMER 触发重绘
+
+# 帧驱动：不再依赖 WM_TIMER。WM_TIMER 是低优先级消息且同 ID 会在队列里
+# 合并，实测 515ms 的入场动画只能跑出 9~22 帧（应约 34 帧）。改为消息循环
+# 按 perf_counter 自驱动，WM_ZD_FRAME 只用来从别的线程唤醒一次重绘。
+WM_QUIT = 0x0012
+PM_REMOVE = 0x0001
+QS_ALLINPUT = 0x04FF
+INFINITE = 0xFFFFFFFF
+SPI_GETCLIENTAREAANIMATION = 0x1042
 
 # SetWindowPos 标志
 SWP_NOSIZE = 0x0001
@@ -132,6 +150,7 @@ SWP_NOACTIVATE = 0x0010
 WM_ZD_CLOSE = 0x0400 + 17     # wparam=1 播退出动画，0 立即隐藏
 WM_ZD_SHOW = 0x0400 + 18      # 再次唤出（窗口复用，不重建）
 WM_ZD_DESTROY = 0x0400 + 19   # 真销毁，进程退出时用
+WM_ZD_FRAME = 0x0400 + 20     # 外部线程请求立刻重绘一帧
 
 WNDPROC = ctypes.WINFUNCTYPE(
     ctypes.c_longlong, wintypes.HWND, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong
@@ -258,6 +277,22 @@ user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.DispatchMessageW.restype = ctypes.c_longlong
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
+
+# 帧驱动用的三个 API。64 位下都要显式声明，否则句柄/返回值会被截成 32 位。
+user32.PeekMessageW.argtypes = [
+    ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+    wintypes.UINT, wintypes.UINT, wintypes.UINT,
+]
+user32.PeekMessageW.restype = wintypes.BOOL
+user32.MsgWaitForMultipleObjects.argtypes = [
+    wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+    wintypes.BOOL, wintypes.DWORD, wintypes.DWORD,
+]
+user32.MsgWaitForMultipleObjects.restype = wintypes.DWORD
+user32.SystemParametersInfoW.argtypes = [
+    wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT,
+]
+user32.SystemParametersInfoW.restype = wintypes.BOOL
 
 user32.PostMessageW.argtypes = [
     wintypes.HWND,
@@ -435,10 +470,47 @@ def _rgb(hexcolor: str):
 
 def ease_out_back(t: float) -> float:
     """cubic-bezier(.34,1.56,.64,1) 的近似 —— 冲过头再回弹，和 CSS 一致。"""
-    c1 = 1.70158
-    c3 = c1 + 1
     u = t - 1
-    return 1 + c3 * u * u * u + c1 * u * u
+    return 1 + BACK_C3 * u * u * u + BACK_C1 * u * u
+
+
+def ease_in_back(t: float) -> float:
+    """ease_out_back 关于 (0.5, 0.5) 的严格镜像。
+
+    入场是「冲过头再回弹」，退场以前用 easeInQuad（纯加速），两者不同族，
+    观感上「进得弹、退得直」。改成镜像后，退场先轻微蓄力再收走，节奏对称。
+    """
+    return 1.0 - ease_out_back(1.0 - t)
+
+
+def _mix_hex(a: str, b: str, t: float) -> str:
+    """两色线性插值，结果量化到 HOVER_STEPS 级。
+
+    量化是关键：hover 渐变时每帧颜色都在变，如果直接返回连续色值，
+    `_brush` / `_pen` 的缓存 key 每帧都是新的，几百个 .NET 对象被造出来，
+    又退回「31ms/帧」的老问题。量化成 8 级后总共只会有 7 个中间色，
+    第一次生成完就一直命中缓存。
+    """
+    q = int(round(max(0.0, min(1.0, t)) * HOVER_STEPS))
+    if q <= 0:
+        return a
+    if q >= HOVER_STEPS:
+        return b
+    ca, cb = _rgb(a), _rgb(b)
+    f = q / HOVER_STEPS
+    return "#%02x%02x%02x" % tuple(int(round(x + (y - x) * f)) for x, y in zip(ca, cb))
+
+
+def _system_motion() -> bool:
+    """Windows「播放动画和过渡效果」是否开启。读不到就当开启。"""
+    try:
+        v = wintypes.BOOL()
+        ok = user32.SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(v), 0
+        )
+        return not ok or bool(v.value)
+    except Exception:
+        return True
 
 
 class Slot:
@@ -660,12 +732,18 @@ class RingDock:
         self._phase = "idle"    # idle / bloom / collapse
         self._t0 = 0.0
         self._frames = []       # 每帧绘制+提交的耗时，用来诊断卡顿
+        self._next_frame_at = 0.0
+        self._last_tick = 0.0
+        self._hi_res = False    # timeBeginPeriod 是否已配对开启
+        self._hover_t = []      # 每块扇形的 hover 渐变进度 0..1
 
         # 动画时长从配置读（设置页的滑块）。错峰和收起按同比例联动，
         # 改一个数就能整体调快调慢，不用分别调三个。
         self.bloom_ms = BLOOM_MS
         self.stagger_ms = BLOOM_STAGGER_MS
-        self.collapse_ms = COLLAPSE_MS
+        self.collapse_ms = round(BLOOM_MS * COLLAPSE_RATIO)
+        self.hover_ms = HOVER_MS
+        self.motion = "full"    # full / reduced / off，由 _load_anim 决定
         self._closing = False
         self._ready = False     # 焦点稳定后才会开启失焦关闭
         self._shown = False     # 当前是否可见
@@ -801,8 +879,12 @@ class RingDock:
 
         # 关键顺序：先在内存里画好动画第 0 帧并提交，再显示。
         # 这样屏幕上出现的第一帧就是完整的一环，没有矩形、没有空环。
-        self._phase = "bloom"
-        self._t0 = time.perf_counter()
+        self._hover_t = [0.0] * self._count
+        # visible=False 只用于跑离屏链路，不显示窗口就别空转动画
+        self._phase = "bloom" if (self.bloom_ms > 0 and self.visible) else "idle"
+        self._t0 = self._last_tick = time.perf_counter()
+        self._next_frame_at = self._t0 + FRAME_MS / 1000.0
+        self._frames = []
         log("开始绘制首帧")
         self._render()
         log("首帧已提交")
@@ -811,7 +893,8 @@ class RingDock:
             user32.ShowWindow(hwnd, SW_SHOWNORMAL)
             self._shown = True
 
-        self._start_timer()
+        if self._need_frame():
+            self._ensure_hires()
         if self.visible:
             self._focus_async()
         log(f"唤出耗时 {(time.perf_counter() - t_start) * 1000:.0f}ms")
@@ -834,19 +917,42 @@ class RingDock:
         return pt.x - w // 2, pt.y - h // 2, w, h, scale
 
     def _load_anim(self) -> None:
-        """从配置读动画时长。设置页改完，下次唤出就生效。
+        """从配置读全局动效设置。设置页改完，下次唤出就生效。
 
-        只暴露一个"入场时长"，错峰延迟和收起时长按同比例折算 —— 用户不需要
-        理解三个参数之间的关系，调一个数整体节奏就是一致的。
+        `animations`（full / reduced / off）是总开关，`dockAnimMs` 是节奏
+        基准，两者共同决定入场、错峰、收起、hover 的实际时长。系统在
+        「播放动画和过渡效果」里关掉动画时，full 会自动降级成 reduced。
         """
+        st = read_settings()
+        motion = st.get("animations") or "full"
+        if motion not in ("full", "reduced", "off"):
+            motion = "full"
+        if motion == "full" and not _system_motion():
+            motion = "reduced"
+        self.motion = motion
+
         try:
-            ms = int(read_settings().get("dockAnimMs") or BLOOM_MS)
+            ms = int(st.get("dockAnimMs") or BLOOM_MS)
         except Exception:
             ms = BLOOM_MS
         ms = max(100, min(800, ms))
-        self.bloom_ms = ms
-        self.stagger_ms = max(0, round(ms * BLOOM_STAGGER_MS / BLOOM_MS))
-        self.collapse_ms = max(60, round(ms * COLLAPSE_MS / BLOOM_MS))
+
+        if motion == "off":
+            self.bloom_ms = 0
+            self.stagger_ms = 0
+            self.collapse_ms = 0
+            self.hover_ms = 0
+        elif motion == "reduced":
+            # 只留短淡入淡出，去掉错峰、回弹和 hover 渐变
+            self.bloom_ms = min(ms, 100)
+            self.stagger_ms = 0
+            self.collapse_ms = 80
+            self.hover_ms = 0
+        else:
+            self.bloom_ms = ms
+            self.stagger_ms = max(0, round(ms * BLOOM_STAGGER_MS / BLOOM_MS))
+            self.collapse_ms = max(60, round(ms * COLLAPSE_RATIO))
+            self.hover_ms = HOVER_MS
 
     def _place(self) -> None:
         """把窗口挪到当前鼠标位置，尺寸和 DPI 跟着变。"""
@@ -881,20 +987,47 @@ class RingDock:
         return wintypes.RECT(0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
 
     def _loop(self) -> None:
+        """消息循环 + 时间驱动的帧循环。
+
+        不用 WM_TIMER：它是低优先级消息，同一 ID 的多条还会被队列合并，
+        系统忙的时候一帧可能隔 50ms 才来（实测入场只跑出 9~22 帧）。
+        这里每次把消息队列抽空后按 perf_counter 判断"到点该画了吗"，
+        再 MsgWaitForMultipleObjects 精确等到那个时刻；期间任何窗口消息
+        （鼠标移动、外部线程的 WM_ZD_FRAME）都会立刻唤醒，不会拖慢响应。
+        """
         msg = wintypes.MSG()
         while self.hwnd:
-            r = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if r <= 0:
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+                if msg.message == WM_QUIT:
+                    return
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            if not self.hwnd:
                 break
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
+
+            now = time.perf_counter()
+            if self._need_frame():
+                if now >= self._next_frame_at:
+                    # 目标时刻按**本帧起点**累加，不是"渲染完再等 FRAME_MS"。
+                    # 后者会把渲染耗时叠加到帧间隔上：7.6ms 渲染 + 15ms 等待
+                    # = 23ms/帧，实际只有 43fps。累加后等待会自动扣掉渲染时间。
+                    self._on_tick()
+                    self._next_frame_at = now + FRAME_MS / 1000.0
+                    continue
+                wait = max(1, int((self._next_frame_at - now) * 1000))
+            else:
+                wait = IDLE_POLL_MS
+            user32.MsgWaitForMultipleObjects(0, None, False, wait, QS_ALLINPUT)
 
     # ---- 消息处理 ----
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         try:
-            if msg == WM_TIMER and wparam == TIMER_ID:
+            if (msg == WM_TIMER and wparam == TIMER_ID) or msg == WM_ZD_FRAME:
+                # 外部线程唤醒：立刻重绘一帧（比如服务启动完状态变了）。
+                # 正常帧由 _loop 按时间自驱动，WM_TIMER 只为兼容旧调用点。
                 self._on_tick()
+                self._next_frame_at = time.perf_counter() + FRAME_MS / 1000.0
                 return 0
             if msg == WM_MOUSEMOVE:
                 self._on_move(lparam)
@@ -928,7 +1061,7 @@ class RingDock:
                 self._begin_close()
                 return 0
             if msg == WM_DESTROY:
-                self._stop_timer()
+                self._release_hires()
                 user32.PostQuitMessage(0)
                 return 0
         except Exception as e:
@@ -953,9 +1086,18 @@ class RingDock:
 
     def _on_move(self, lparam):
         idx = self._hit(lparam)
-        if idx != self._hover:
-            self._hover = idx
+        if idx == self._hover:
+            return
+        self._hover = idx
+        if self.motion == "off" or self.hover_ms <= 0:
+            # 关掉动效时别留半截渐变，直接落到终态
+            self._hover_t = [1.0 if i == idx else 0.0 for i in range(self._count)]
             self._render()
+            return
+        # 只改目标，渐变由 _on_tick 推进。WM_MOUSEMOVE 的频率远高于帧率，
+        # 在这儿直接 _render 会把每一次鼠标位移都变成一次全帧提交。
+        self._ensure_hires()
+        self._next_frame_at = 0.0
 
     def _on_click(self, lparam):
         idx = self._hit(lparam)
@@ -991,6 +1133,8 @@ class RingDock:
 
         self._busy.add(slot.id)
         self._hover = -1
+        # 点击是确定动作，颜色立刻落到终态，不留半截 hover 渐变
+        self._hover_t = [0.0] * max(1, self._count)
         self._render()
 
         def work():
@@ -1013,7 +1157,7 @@ class RingDock:
             finally:
                 self._busy.discard(slot.id)
                 if self.hwnd:
-                    user32.PostMessageW(self.hwnd, WM_TIMER, TIMER_ID, 0)
+                    user32.PostMessageW(self.hwnd, WM_ZD_FRAME, 0, 0)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1047,27 +1191,43 @@ class RingDock:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _start_timer(self) -> None:
-        """开动画定时器，顺便把系统定时器精度提到 1ms。
+    def _need_frame(self) -> bool:
+        """当前是否还需要继续出帧。
 
-        `SetTimer` 的默认精度是 15.6ms，而且 WM_TIMER 是低优先级消息，实测
-        一帧要 30ms 才来一次 —— 渲染明明只要 8ms，动画却只有 33fps。动画
-        总共 500ms 出头，这点功耗代价可以忽略。
+        帧源只有一个：入场 / 收起 / hover 渐变三者任一未结束。全部结束后
+        `_loop` 退回低频消息轮询，CPU 归零。
         """
+        if not self._shown:
+            return False
+        if self._phase in ("bloom", "collapse"):
+            return True
+        if self.motion == "off" or self.hover_ms <= 0:
+            return False
+        return any(
+            abs(t - (1.0 if i == self._hover else 0.0)) > 0.001
+            for i, t in enumerate(self._hover_t)
+        )
+
+    def _ensure_hires(self) -> None:
+        """动画期间把系统定时器精度提到 1ms。
+
+        只开一次：以前每次启动动画都 timeBeginPeriod，bloom 途中触发
+        收起就会开两次却只 End 一次，精度设置会残留到进程结束。
+        """
+        if self._hi_res:
+            return
         try:
             winmm.timeBeginPeriod(1)
             self._hi_res = True
         except Exception:
             self._hi_res = False
-        user32.SetTimer(self.hwnd, TIMER_ID, FRAME_MS, None)
 
-    def _stop_timer(self) -> None:
-        user32.KillTimer(self.hwnd, TIMER_ID)
-        if getattr(self, "_hi_res", False):
-            try:
-                winmm.timeEndPeriod(1)
-            except Exception:
-                pass
+    def _release_hires(self) -> None:
+        if not self._hi_res:
+            return
+        try:
+            winmm.timeEndPeriod(1)
+        finally:
             self._hi_res = False
 
     def _begin_close(self, after=None) -> None:
@@ -1075,18 +1235,23 @@ class RingDock:
             return
         self._closing = True
         self._after = after
+        if self.motion == "off" or self.collapse_ms <= 0:
+            self._hide_now()
+            return
         self._phase = "collapse"
-        self._t0 = time.perf_counter()
-        self._start_timer()
+        self._t0 = self._last_tick = time.perf_counter()
+        self._next_frame_at = self._t0
+        self._ensure_hires()
 
     def _hide_now(self) -> None:
         """收工：隐藏窗口但**不销毁**，绘制表面和 GDI+ 都留着给下次用。"""
-        self._stop_timer()
+        self._release_hires()
         self._phase = "idle"
         self._shown = False
         self._closing = False
         self._ready = False
         self._hover = -1
+        self._hover_t = [0.0] * max(1, self._count)
         user32.ShowWindow(self.hwnd, SW_HIDE)
         after = getattr(self, "_after", None)
         self._after = None
@@ -1113,13 +1278,15 @@ class RingDock:
             self._count = len(self._slots)
             t_fetch = time.perf_counter()
             self._hover = -1
+            self._hover_t = [0.0] * self._count
             self._err.clear()
             self._busy.clear()
             self._closing = False
             self._ready = False
-            self._phase = "bloom"
+            self._phase = "bloom" if self.bloom_ms > 0 else "idle"
             self._frames = []
-            self._t0 = time.perf_counter()
+            self._t0 = self._last_tick = time.perf_counter()
+            self._next_frame_at = self._t0 + FRAME_MS / 1000.0
 
             apply_hit_region(self.hwnd, self._w, self._h, self._count, self._scale)
             t_region = time.perf_counter()
@@ -1128,7 +1295,8 @@ class RingDock:
 
             user32.ShowWindow(self.hwnd, SW_SHOWNORMAL)
             self._shown = True
-            self._start_timer()
+            if self._need_frame():
+                self._ensure_hires()
             self._focus_async()
             log(
                 f"复用唤出 {(time.perf_counter() - t0) * 1000:.0f}ms "
@@ -1145,8 +1313,22 @@ class RingDock:
     def _on_tick(self) -> None:
         t_frame = time.perf_counter()
         now = t_frame
+        dt = max(0.0, min(0.1, now - self._last_tick))
+        self._last_tick = now
         elapsed_ms = (now - self._t0) * 1000
 
+        # 1) hover 渐变按真实帧间隔推进。掉帧时步子变大，总时长不变，
+        #    不会变成"帧数少了动画也变慢"。
+        if self._hover_t and self.hover_ms > 0 and self.motion != "off":
+            step = dt * 1000.0 / self.hover_ms
+            for i, cur in enumerate(self._hover_t):
+                target = 1.0 if i == self._hover else 0.0
+                if cur < target:
+                    self._hover_t[i] = min(target, cur + step)
+                elif cur > target:
+                    self._hover_t[i] = max(target, cur - step)
+
+        # 2) 入场 / 收起状态推进
         if self._phase == "bloom":
             total = self.bloom_ms + self.stagger_ms * max(0, self._count - 1)
             if elapsed_ms >= total:
@@ -1162,15 +1344,17 @@ class RingDock:
                         )
                     else:
                         log("入场完成，开始监控失焦")
-                self._stop_timer()
-                self._render()
-                return
         elif self._phase == "collapse":
             if elapsed_ms >= self.collapse_ms:
                 self._hide_now()
                 return
 
         self._render()
+
+        # 3) 三个动画源全部到位就还掉高精度定时器，_loop 退回低频轮询
+        if not self._need_frame():
+            self._release_hires()
+
         if len(self._frames) < 400:
             self._frames.append(time.perf_counter() - t_frame)
 
@@ -1187,13 +1371,17 @@ class RingDock:
             return 1.0
         elapsed = (time.perf_counter() - self._t0) * 1000
         if self._phase == "bloom":
+            if self.bloom_ms <= 0:
+                return 1.0
             local = (elapsed - idx * self.stagger_ms) / self.bloom_ms
             if local <= 0:
                 return 0.0
             return 0.25 + 0.75 * ease_out_back(min(1.0, local))
-        # collapse：反向收缩，整体同时进行
+        # collapse：入场曲线的严格镜像，先轻微蓄力再收走
+        if self.collapse_ms <= 0:
+            return 0.3
         local = min(1.0, elapsed / self.collapse_ms)
-        return 1.0 - 0.7 * (local * local)  # easeInQuad，贴近 cubic-bezier(.4,0,.9,.4)
+        return 1.0 - 0.7 * ease_in_back(local)
 
     def _global_alpha(self) -> float:
         """整帧透明度。bloom 前 1/3 时长淡入，collapse 全程淡出。"""
@@ -1202,7 +1390,7 @@ class RingDock:
         elapsed = (time.perf_counter() - self._t0) * 1000
         if self._phase == "bloom":
             return min(1.0, elapsed / max(1.0, self.bloom_ms * 0.35))
-        return max(0.0, 1.0 - elapsed / self.collapse_ms)
+        return max(0.0, 1.0 - elapsed / max(1.0, self.collapse_ms))
 
     # ---- 缓存 ----
 
@@ -1260,27 +1448,30 @@ class RingDock:
         self._icon_cache[kind] = out
         return out
 
-    def _sector_color(self, slot: Slot, hovered: bool) -> str:
+    def _sector_color(self, slot: Slot, t: float) -> str:
+        """t 是这一块 hover 渐变的进度 0..1，不是布尔。"""
         if slot.is_home:
-            return SECTOR_HOME_HOVER if hovered else SECTOR_HOME
-        if slot.status in ("crashed", "failed") or slot.id in self._err:
-            return SECTOR_ERR
-        if slot.status in ("starting", "stopping") or slot.id in self._busy:
-            return SECTOR_BUSY
-        if slot.status == "running":
-            return SECTOR_RUNNING_HOVER if hovered else SECTOR_RUNNING
-        return SECTOR_HOVER if hovered else SECTOR
+            base, hot = SECTOR_HOME, SECTOR_HOME_HOVER
+        elif slot.status in ("crashed", "failed") or slot.id in self._err:
+            base, hot = SECTOR_ERR, SECTOR_ERR_HOVER
+        elif slot.status in ("starting", "stopping") or slot.id in self._busy:
+            base, hot = SECTOR_BUSY, SECTOR_BUSY_HOVER
+        elif slot.status == "running":
+            base, hot = SECTOR_RUNNING, SECTOR_RUNNING_HOVER
+        else:
+            base, hot = SECTOR, SECTOR_HOVER
+        return _mix_hex(base, hot, t)
 
-    def _fg_color(self, slot: Slot, hovered: bool, icon: bool) -> str:
+    def _fg_color(self, slot: Slot, t: float, icon: bool) -> str:
         if slot.is_home:
-            return ICO_HOME if icon else TEXT_HOME
-        if slot.status in ("crashed", "failed") or slot.id in self._err:
-            return TEXT_ERR
-        if slot.status == "running":
-            return ICO_HOVER if icon else TEXT_RUNNING
-        if hovered:
-            return ICO_HOVER if icon else TEXT_HOVER
-        return ICO if icon else TEXT
+            base = hot = ICO_HOME if icon else TEXT_HOME
+        elif slot.status in ("crashed", "failed") or slot.id in self._err:
+            base = hot = TEXT_ERR
+        elif slot.status == "running":
+            base = hot = ICO_HOVER if icon else TEXT_RUNNING
+        else:
+            base, hot = (ICO, ICO_HOVER) if icon else (TEXT, TEXT_HOVER)
+        return _mix_hex(base, hot, t)
 
     def _ensure_surface(self):
         """Bitmap / Graphics / DIBSection 全部复用，只按尺寸重建。"""
@@ -1356,15 +1547,16 @@ class RingDock:
             s = self._progress(i)
             if s <= 0.002:
                 continue
-            self._draw_slot(g, slot, i, s, i == self._hover)
+            ht = self._hover_t[i] if i < len(self._hover_t) else 0.0
+            self._draw_slot(g, slot, i, s, ht)
 
         g.ResetTransform()
         self._commit(self._global_alpha())
 
-    def _draw_slot(self, g, slot, idx, s, hovered) -> None:
+    def _draw_slot(self, g, slot, idx, s, ht) -> None:
         step = 360.0 / max(1, self._count)
         mid = idx * step
-        brush = self._brush(self._sector_color(slot, hovered))
+        brush = self._brush(self._sector_color(slot, ht))
         path = self._sector_path(idx)
 
         state = g.Save()
@@ -1380,14 +1572,14 @@ class RingDock:
             )
             g.TranslateTransform(pos[0], pos[1])
 
-            self._draw_icon(g, slot, hovered)
-            self._draw_label(g, slot, hovered)
+            self._draw_icon(g, slot, ht)
+            self._draw_label(g, slot, ht)
         finally:
             g.Restore(state)
 
-    def _draw_icon(self, g, slot, hovered) -> None:
+    def _draw_icon(self, g, slot, ht) -> None:
         # 放大后 pen 会跟着变粗，所以宽度先除掉倍数，缩放回来正好还是 1.4px
-        pen = self._pen(self._fg_color(slot, hovered, icon=True), 1.4 / ICON_SCALE)
+        pen = self._pen(self._fg_color(slot, ht, icon=True), 1.4 / ICON_SCALE)
         kind = "home" if slot.is_home else slot.kind
         state = g.Save()
         try:
@@ -1499,10 +1691,10 @@ class RingDock:
             self._budget_px = 9999.0
         return self._budget_px
 
-    def _draw_label(self, g, slot, hovered) -> None:
+    def _draw_label(self, g, slot, ht) -> None:
         d = _load_gdip()
         text = self._label_text(slot)
-        hexcolor = TEXT_ERR if slot.id in self._err else self._fg_color(slot, hovered, icon=False)
+        hexcolor = TEXT_ERR if slot.id in self._err else self._fg_color(slot, ht, icon=False)
         max_px = self._label_width()
         g.DrawString(
             text,
@@ -1600,6 +1792,9 @@ class RingDock:
             gdi32.SelectObject(self._memdc, old)
 
     def _release(self) -> None:
+        # 兜底：窗口线程异常退出时也要把 timeBeginPeriod 还回去，
+        # 否则 1ms 精度会残留到整个进程结束，影响系统功耗。
+        self._release_hires()
         self._free_surface()
         try:
             if self._font_obj is not None:

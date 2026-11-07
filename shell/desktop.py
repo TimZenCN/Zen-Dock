@@ -845,6 +845,10 @@ class App:
         else:
             log("show_main: 找不到主窗口句柄")
 
+        # 页面内淡入。托盘/唤醒口进来时是子线程，evaluate_js 可能撞上
+        # WebView2 的 COM 线程限制；call_main_js 内部已兜底，失败只是没动画。
+        self.call_main_js("flashIn", {})
+
     def call_main_js(self, fn: str, arg) -> None:
         if self.main is None:
             return
